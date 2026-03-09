@@ -60,7 +60,7 @@ By leveraging the [Solution Accelerators](docs/Solution-Accelerators.md), we can
 # Project Kickoff
 
 - [Best Practices](docs/Best-Practices_decision-tree_for_building_copilot_studio_agent.md): Decision tree and best practices to build an agent.
-- [Funtional Scoping](docs/docs/Funtional-Scoping.md): Essential project template with AI‑guided prompts and an AI‑empowered scoping agent to accelerate fast, consistent technical scoping.
+- [Funtional Scoping](docs/Funtional-Scoping.md): Essential project template with AI‑guided prompts and an AI‑empowered scoping agent to accelerate fast, consistent technical scoping.
 
 # Learning Path
 **Lab 0: Prerequisites**
