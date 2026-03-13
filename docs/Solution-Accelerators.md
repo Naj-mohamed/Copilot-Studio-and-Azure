@@ -30,3 +30,8 @@ The [Video RAG Accelerator](/accelerators/Video-RAG/) enables intelligent questi
 Training videos uploaded to storage are automatically processed end-to-end using event-driven Azure services. Video content is analyzed using Azure AI Content Understanding (Video Analyzer) to extract transcripts, summaries, and contextual markdown. The extracted information is normalized and indexed in Azure AI Search, enabling fast, accurate, and scalable retrieval.
 Users can then ask natural-language questions in Copilot Studio, receiving answers grounded directly in the video content.
 
+## Sharepoint Connector Accelerator 
+
+The [Sharepoint Connector Accelerator](/accelerators/sharepoint-connector/) enalbe how to build a custom push connector for Azure AI Search. This example indexes SharePoint Online documents using Microsoft Graph API, running as an Azure Function on a timer — pulling files, extracting text, generating embeddings, and pushing document chunks directly into a search index.
+
+The same pattern can be used as a starting point for your own connector. The document processor is a basic text extraction implementation — for production use with complex documents (e.g. PDFs with tables, scanned images), consider replacing it with Azure Document Intelligence or similar. The chunker and index schema should also be adjusted based on your specific documents and requirements.
