@@ -56,6 +56,7 @@ By leveraging the [Solution Accelerators](docs/Solution-Accelerators.md), we can
 - Pairing Copilot Studio with [Content Flow](https://github.com/Azure/contentflow) enables high‑accuracy RAG by automating large‑scale document ingestion, intelligent chunking, and multimodal retrieval for enterprise scenarios.
 - [AISearch Flow](/accelerators/aisearch/) enables users to interact with Azure AI Search through a manual button trigger, supporting three main operations: creating an index, uploading documents, and performing semantic search queries.
 - The [Video RAG Accelerator](/accelerators/Video-RAG/) enables intelligent question-and-answer over training videos by automatically extracting video content, transforming it into structured knowledge, and grounding responses in Azure AI Search for use in Copilot Studio.
+- The [Sharepoint Connector Accelerator](/accelerators/sharepoint-connector) enable how to build a bespoke Azure AI Search connector that indexes SharePoint Online content using Microsoft Graph. Running as a timer‑based Azure Function, it automates document retrieval, text extraction, chunking, embedding generation, and pushes enriched content directly into an Azure AI Search index for grounding Copilot Studio experiences.
   
 # Project Kickoff
 
