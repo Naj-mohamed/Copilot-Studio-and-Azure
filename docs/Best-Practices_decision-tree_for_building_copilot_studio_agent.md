@@ -1,4 +1,4 @@
-# Best Practices Decision Tree for Building a Copilot Studio Agent
+﻿# Best Practices Decision Tree for Building a Copilot Studio Agent
 
 ## Objectives
 
@@ -77,15 +77,15 @@ flowchart TD
 
     %% ── Model Selection ──
     MODEL{6. AI Model Selection?}
-    MODEL -->|Balanced — most cases| DEFAULT[✅ Default GPT-4.1]
-    MODEL -->|Complex reasoning| DEEP[Deep Reasoning]
-    MODEL -->|Fast, cost-efficient| GENERAL[General / Lightweight]
-    MODEL -->|System decides per query| ADAPTIVE[Auto / Adaptive]
+    MODEL -->|General tasks| DEFAULT["✅ GPT-4.1 (Default)<br/>GPT-5 Chat<br/>Claude Sonnet 4.5<br/>Claude Sonnet 4.6"]
+    MODEL -->|Deep reasoning| DEEP["GPT-5 Reasoning<br/>Claude Opus 4.6"]
+    MODEL -->|Auto-switch chat + reason| ADAPTIVE["GPT-5 Auto"]
+    MODEL -->|Experimental| EXPERIMENTAL["GPT-5.3 Chat<br/>GPT-5.4 Reasoning<br/>Grok 4.1"]
 
     DEFAULT --> DONE([🎉 Agent Ready — Test & Iterate])
     DEEP --> DONE
-    GENERAL --> DONE
     ADAPTIVE --> DONE
+    EXPERIMENTAL --> DONE
 
     %% ── Styles ──
     classDef decision fill:#4a90d9,stroke:#2c5f8a,color:#fff,font-weight:bold
@@ -95,7 +95,7 @@ flowchart TD
     classDef endpoint fill:#6c5ce7,stroke:#4834a8,color:#fff,font-weight:bold
 
     class ORCH,INFO,KS,TOPICS,ENT,TOOLS,AUTO,MODEL decision
-    class GEN_ACTIONS,CLASSIC_ACTIONS,KS_ADD,TOPICS_CREATE,TOPICS_SKIP,ENT_ACTIONS,TOOLS_ADD,TOOLS_LIST action
+    class GEN_ACTIONS,CLASSIC_ACTIONS,KS_ADD,TOPICS_CREATE,TOPICS_SKIP,ENT_ACTIONS,TOOLS_ADD,TOOLS_LIST,EXPERIMENTAL action
     class GEN,DEFAULT recommended
     class COMBINE,TOOLS_BP tip
     class START,DONE endpoint
@@ -167,13 +167,13 @@ When implementing multi-step operations or complex logic, you have a choice betw
 *Tip*: After integrating, test the end-to-end automation by triggering it through the agent to ensure data passes correctly and the user gets a confirmation or result back.
 
 ### 6. Select the AI Model for Generative Responses
-Finally, choose the AI model that powers your agent’s understanding and language generation. Copilot Studio allows switching the primary model:
+Finally, choose the AI model that powers your agent's understanding and language generation. Copilot Studio allows switching the primary model:
 
-- **Default (General-purpose) Model**: This is usually the latest stable GPT-4-based model (as of late 2025, the default is GPT-4.1). It offers a strong mix of quality and reliability. In most cases, stick with the default unless you have specific needs – it’s considered the best general performer and will be automatically updated over time.
-- **“Deep” Reasoning Model**: Tagged as **Deep**, this type is optimised for complex, multi-step reasoning and tool usage. For example, if your agent will analyze lengthy documents or perform intricate multi-hop decisions (like troubleshooting across multiple systems or drafting detailed reports), a Deep model (GPT-4 series or above) may yield better results. The trade-off is typically **higher latency and cost**. User the word **Reason** in an agent's instruction to use this *Deep reasoning*.
-- **“General” Lightweight Model**: Tagged as **General**, these models prioritise speed and cost-efficiency for everyday tasks. Use them for simpler bots where fast responses are crucial and the content is straightforward (small talk, simple FAQs). They have **shallower reasoning depth** and may not handle very complex queries well.
-- **Auto / Adaptive Setting**: An Auto tag means the system will route queries dynamically, potentially using heavier reasoning only when needed. This can be a good compromise if available, letting the platform decide per conversation turn.
-- **Experimental/Preview Models**: You might see options for the newest experimental models (GPT-5 preview, etc.). Use caution with these – they can be more powerful, but are not fully tested and not meant for production. Admins might disable these entirely. Evaluate them in a dev environment if curious, but for a stable agent, stick to GA (generally available) models.
+- **Default (General-purpose) Model**: This is usually the latest stable GPT-4-based model (as of late 2025, the default is GPT-4.1, with GPT-5 Chat, Claude Sonnet 4.5 and Claude Sonnet 4.6 as alternative general-purpose options). It offers a strong mix of quality and reliability. In most cases, stick with the default unless you have specific needs – it's considered the best general performer and will be automatically updated over time.
+- **"Deep" Reasoning Model**: Tagged as Deep, this type is optimised for complex, multi-step reasoning and tool usage. For example, if your agent will analyze lengthy documents or perform intricate multi-hop decisions (like troubleshooting across multiple systems or drafting detailed reports), a Deep model (GPT-5 Reasoning or Claude Opus 4.6) may yield better results. The trade-off is typically higher latency and cost. User the word Reason in an agent's instruction to use this *Deep reasoning*.
+- **"General" Lightweight Model**: Tagged as General, these models prioritise speed and cost-efficiency for everyday tasks. Use them for simpler bots where fast responses are crucial and the content is straightforward (small talk, simple FAQs). They have **shallower reasoning depth** and may not handle very complex queries well.
+- **Auto / Adaptive Setting**: An Auto tag means the system will route queries dynamically (currently GPT-5 Auto), potentially using heavier reasoning only when needed. This can be a good compromise if available, letting the platform decide per conversation turn.
+- **Experimental/Preview Models**: You might see options for the newest experimental models (currently GPT-5.3 Chat, GPT-5.4 Reasoning, and Grok 4.1). Use caution with these – they can be more powerful, but are not fully tested and not meant for production. Admins might disable these entirely. Evaluate them in a dev environment if curious, but for a stable agent, stick to GA (generally available) models.
 
 *Best Practice*: For most enterprise use cases, start with the Default model which is balanced for mixed workloads. If you notice the agent struggling with complex tasks or being too slow/verbose, you can adjust to a General (faster) model or if not reasoning well enough, try Deep Reasoning.
 
