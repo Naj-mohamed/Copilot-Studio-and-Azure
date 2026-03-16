@@ -23,7 +23,7 @@ In this lab you will **fine‑tune a text model** in **Azure AI Foundry**, deplo
 
 > References:  
 > - Azure AI Foundry model catalog & deployment: Microsoft Learn.  
-> - Copilot Studio Prompt builder model options & settings (default **GPT‑4.1 mini** and others may be available).  
+> - Copilot Studio Prompt builder model options & settings (default **GPT‑4.1 mini**; other models such as GPT‑4.1, GPT‑5 Chat, GPT‑5 Reasoning, GPT‑5.3 Chat, and GPT‑5.2 Reasoning may also be available).  
 > - Azure AI Evaluation & Monitoring guidance (metrics, safety, groundedness).  
 > - Copilot Studio extensibility (actions/plugins) and access/licensing.
 
