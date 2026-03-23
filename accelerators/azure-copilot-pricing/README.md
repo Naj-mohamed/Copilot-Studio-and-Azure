@@ -1,6 +1,6 @@
 # Azure and Copilot Studio pricing Skills for GitHub Copilot
 
-This Accelerator show how to use skills that enables GitHub Copilot to fetch real-time Azure retail pricing and estimate Copilot Studio agent credit consumption directly inside your editor.
+This Accelerator show how to use a skill that enables GitHub Copilot to fetch real-time Azure retail pricing and estimate Copilot Studio agent credit consumption directly inside your editor.
 
 <span style="color:red"><strong>
 PLEASE NOTE: This is an indicative estimate only. It does not represent actual consumption. The figures are provided solely to give you a reference point and help you better understand the potential cost.
