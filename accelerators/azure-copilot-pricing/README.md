@@ -71,10 +71,9 @@ If you want to pull the skill directly from the source repository:
 
 ```bash
 # Clone the repo (or use sparse checkout for just the skill folder)
-git clone https://github.com/github/awesome-copilot.git
-
+git clone https://github.com/Azure/Copilot-Studio-and-Azure.git
 # Copy the skill into your project
-cp -r awesome-copilot/skills/azure-pricing .github/skills/azure-pricing
+cp -r Copilot-Studio-and-Azure/skills/azure-pricing .github/skills/azure-pricing
 ```
 
 Then commit the `.github/skills/azure-pricing/` folder to your repository.
@@ -141,6 +140,3 @@ To update the cached reference data:
 3. **Copilot Studio rates**: Update from the [billing rates documentation](https://learn.microsoft.com/en-us/microsoft-copilot-studio/requirements-messages-management).
 4. **Cost formulas**: Verify formulas against the [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calculator/).
 
-## License
-
-This skill is part of the [awesome-copilot](https://github.com/github/awesome-copilot) repository and follows its license terms.
