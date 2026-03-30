@@ -95,6 +95,7 @@ By leveraging the [Solution Accelerators](docs/Solution-Accelerators.md), we can
 - Retail & E-commerce: Customer service agents use Copilot Studio and Azure AI Search to answer product questions and check inventory, improving response speed and accuracy. AI search refines results based on context and user intent.
 - Energy & Utilities: Technicians access Copilot Studio with Azure AI Search to retrieve maintenance records and safety procedures, boosting field efficiency. Intelligent search filters ensure compliance and operational safety.
 - Fraud Investigation: Financial analysts use Copilot Studio with Foundry IQ to investigate suspicious transactions by querying fraud patterns, regulatory compliance guidelines, and investigation procedures simultaneously. Foundry IQ's agentic retrieval intelligently selects relevant sources, providing grounded answers with citations—achieving 80% reduction in research time and 60% improvement in fraud detection accuracy.
+- NGOs & Social Impact Organizations: Nonprofits use Copilot Studio to coordinate donors, volunteers, and field teams through intelligent AI agents. Agents manage donation intake, match supply with community needs, coordinate volunteer availability, and escalate urgent cases to human coordinators. This improves transparency, reduces manual coordination overhead, and helps organizations scale their impact while ensuring ethical, human‑in‑the‑loop decision making. To try it out, visit the [AI for Good Hackathon](https://github.com/manuelpsnunes/ai-for-good-agent-pathway)
 
 
 ## Contributing
