@@ -1,7 +1,7 @@
 #
 aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.13.3
+aiohttp==3.13.4
     # via -r requirements.in
 aiosignal==1.4.0
     # via aiohttp
@@ -74,7 +74,7 @@ comm==0.2.3
     # via
     #   ipykernel
     #   ipywidgets
-cryptography==46.0.5
+cryptography==46.0.6
     # via
     #   azure-identity
     #   azure-storage-blob
@@ -282,7 +282,7 @@ pydantic==2.12.5
     #   openai
 pydantic-core==2.41.5
     # via pydantic
-pygments==2.19.2
+pygments==2.20.0
     # via
     #   ipython
     #   ipython-pygments-lexers
@@ -318,7 +318,7 @@ referencing==0.37.0
     #   jsonschema
     #   jsonschema-specifications
     #   jupyter-events
-requests==2.32.5
+requests==2.33.0
     # via
     #   -r requirements.in
     #   azure-core

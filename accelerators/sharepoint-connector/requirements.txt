@@ -37,7 +37,7 @@ colorclass==2.2.2
     # via oletools
 compressed-rtf==1.0.7
     # via extract-msg
-cryptography==46.0.5
+cryptography==46.0.6
     # via
     #   azure-identity
     #   msal
@@ -130,7 +130,7 @@ python-pptx==1.0.2
     # via sharepoint-connector
 red-black-tree-mod==1.22
     # via extract-msg
-requests==2.32.5
+requests==2.33.0
     # via
     #   azure-core
     #   msal

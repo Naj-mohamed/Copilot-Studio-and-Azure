@@ -57,11 +57,13 @@ By leveraging the [Solution Accelerators](docs/Solution-Accelerators.md), we can
 - [AISearch Flow](/accelerators/aisearch/) enables users to interact with Azure AI Search through a manual button trigger, supporting three main operations: creating an index, uploading documents, and performing semantic search queries.
 - The [Video RAG Accelerator](/accelerators/Video-RAG/) enables intelligent question-and-answer over training videos by automatically extracting video content, transforming it into structured knowledge, and grounding responses in Azure AI Search for use in Copilot Studio.
 - The [Sharepoint Connector Accelerator](/accelerators/sharepoint-connector) enable how to build a bespoke Azure AI Search connector that indexes SharePoint Online content using Microsoft Graph. Running as a timer‑based Azure Function, it automates document retrieval, text extraction, chunking, embedding generation, and pushes enriched content directly into an Azure AI Search index for grounding Copilot Studio experiences.
+- The [Azure Copilot Pricing Accelerator](/accelerators/azure-copilot-pricing) enables GitHub Copilot to fetch real-time Azure retail pricing and estimate Copilot Studio/foundry agent credit consumption directly inside your editor.
   
 # Project Kickoff
 
 - [Best Practices](docs/Best-Practices_decision-tree_for_building_copilot_studio_agent.md): Decision tree and best practices to build an agent.
 - [Functional Scoping](docs/Funtional-Scoping.md): Essential project template with AI‑guided prompts and an AI‑empowered scoping agent to accelerate fast, consistent technical scoping.
+- [Project Requirement](docs/Project-Requirement.md): This guide establishes the commercial, security, platform, and governance readiness required for teams to safely and efficiently design, deploy, and operate Copilot Studio agents integrated with Azure AI Foundry.
 
 # Learning Path
 **Lab 0: Prerequisites**
@@ -93,6 +95,7 @@ By leveraging the [Solution Accelerators](docs/Solution-Accelerators.md), we can
 - Retail & E-commerce: Customer service agents use Copilot Studio and Azure AI Search to answer product questions and check inventory, improving response speed and accuracy. AI search refines results based on context and user intent.
 - Energy & Utilities: Technicians access Copilot Studio with Azure AI Search to retrieve maintenance records and safety procedures, boosting field efficiency. Intelligent search filters ensure compliance and operational safety.
 - Fraud Investigation: Financial analysts use Copilot Studio with Foundry IQ to investigate suspicious transactions by querying fraud patterns, regulatory compliance guidelines, and investigation procedures simultaneously. Foundry IQ's agentic retrieval intelligently selects relevant sources, providing grounded answers with citations—achieving 80% reduction in research time and 60% improvement in fraud detection accuracy.
+- NGOs & Social Impact Organizations: Nonprofits use Copilot Studio to coordinate donors, volunteers, and field teams through intelligent AI agents. Agents manage donation intake, match supply with community needs, coordinate volunteer availability, and escalate urgent cases to human coordinators. This improves transparency, reduces manual coordination overhead, and helps organizations scale their impact while ensuring ethical, human‑in‑the‑loop decision making. To try it out, visit the [AI for Good Hackathon](https://github.com/manuelpsnunes/ai-for-good-agent-pathway)
 
 
 ## Contributing

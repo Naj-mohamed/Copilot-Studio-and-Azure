@@ -1,0 +1,11 @@
+{
+  "name": "copilot-studio-and-azure-root",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "npm run dev --prefix src",
+    "build": "npm run build --prefix src",
+    "preview": "npm run preview --prefix src",
+    "lint": "npm run lint --prefix src"
+  }
+}
