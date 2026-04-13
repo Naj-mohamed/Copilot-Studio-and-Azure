@@ -58,6 +58,7 @@ By leveraging the [Solution Accelerators](docs/Solution-Accelerators.md), we can
 - The [Video RAG Accelerator](/accelerators/Video-RAG/) enables intelligent question-and-answer over training videos by automatically extracting video content, transforming it into structured knowledge, and grounding responses in Azure AI Search for use in Copilot Studio.
 - The [Sharepoint Connector Accelerator](/accelerators/sharepoint-connector) enable how to build a bespoke Azure AI Search connector that indexes SharePoint Online content using Microsoft Graph. Running as a timer‑based Azure Function, it automates document retrieval, text extraction, chunking, embedding generation, and pushes enriched content directly into an Azure AI Search index for grounding Copilot Studio experiences.
 - The [Azure Copilot Pricing Accelerator](/accelerators/azure-copilot-pricing) enables GitHub Copilot to fetch real-time Azure retail pricing and estimate Copilot Studio/foundry agent credit consumption directly inside your editor.
+- The [Content Understanding Accelerator](/accelerators/contentunderstanding) enables Copilot Studio to use Azure AI Content Understanding for multimodal extraction (documents, images, audio, and video), automatically transforming unstructured enterprise content into structured and grounded outputs.
   
 # Project Kickoff
 
