@@ -1,6 +1,6 @@
 #  Content Understanding Flow Accelerator
 ## Objectives
-Copilot Studio is a native tool that can be extended with various Azure AI capabilities. Thanks to Microsoft’s accelerators, we can enhance its functionality and significantly improve performance. In this document, we’ll explore how each accelerator can support and complement Copilot Studio to achieve this goal.
+Copilot Studio is a native tool that can be extended with various Azure AI capabilities. Thanks to this accelerators, we can enhance its functionality and significantly improve performance. The accelerator enables Copilot Studio to use Azure AI Content Understanding for multimodal extraction (documents, images, audio, and video), automatically transforming unstructured enterprise content into structured and grounded outputs.
 
 On this case importing the [Content Understanding Flow] we were able to connect Copilot Studio with Content Understanding in a more efficient way, enabling advanced search capabilities and improving the overall user experience.
 
