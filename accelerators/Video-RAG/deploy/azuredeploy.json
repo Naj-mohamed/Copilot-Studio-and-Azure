@@ -116,8 +116,8 @@
         "[resourceId('Microsoft.CognitiveServices/accounts', variables('aiServicesName'))]"
       ],
       "sku": {
-        "name": "GlobalStandard",
-        "capacity": 10
+        "name": "Standard",
+        "capacity": 1
       },
       "properties": {
         "model": {
@@ -136,8 +136,8 @@
         "[resourceId('Microsoft.CognitiveServices/accounts/deployments', variables('aiServicesName'), 'gpt-4.1')]"
       ],
       "sku": {
-        "name": "GlobalStandard",
-        "capacity": 10
+        "name": "Standard",
+        "capacity": 1
       },
       "properties": {
         "model": {
@@ -157,7 +157,7 @@
       ],
       "sku": {
         "name": "Standard",
-        "capacity": 120
+        "capacity": 1
       },
       "properties": {
         "model": {
@@ -190,7 +190,7 @@
       ],
       "sku": {
         "name": "Standard",
-        "capacity": 120
+        "capacity": 1
       },
       "properties": {
         "model": {
