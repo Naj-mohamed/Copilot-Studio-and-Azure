@@ -71,7 +71,9 @@
     "storageBlobDataReaderRoleId": "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
     "eventGridContributorRoleId": "428e0ff0-5e57-4d9c-a221-2c70d0e0a443",
     "cognitiveServicesUserRoleId": "a97b65f3-24c7-4388-baec-2e87135dc908",
-    "cognitiveServicesOpenAIUserRoleId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+    "cognitiveServicesOpenAIUserRoleId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+    "keyVaultSecretsUserRoleId": "4633458b-17de-408a-b874-0445c86b69e6",
+    "searchAdminKeySecretName": "search-admin-key"
   },
   "resources": [
     {
@@ -187,6 +189,18 @@
       }
     },
     {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2023-07-01",
+      "name": "[concat(variables('keyVaultName'), '/', variables('searchAdminKeySecretName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+        "[resourceId('Microsoft.Search/searchServices', variables('searchServiceName'))]"
+      ],
+      "properties": {
+        "value": "[listAdminKeys(resourceId('Microsoft.Search/searchServices', variables('searchServiceName')), '2024-03-01-preview').primaryKey]"
+      }
+    },
+    {
       "type": "Microsoft.MachineLearningServices/workspaces",
       "apiVersion": "2024-10-01",
       "name": "[variables('foundryHubName')]",
@@ -295,6 +309,45 @@
         "replicaCount": 1,
         "partitionCount": 1,
         "hostingMode": "default"
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deploymentScripts",
+      "apiVersion": "2023-08-01",
+      "name": "createSearchIndex",
+      "location": "[parameters('location')]",
+      "kind": "AzureCLI",
+      "dependsOn": [
+        "[resourceId('Microsoft.Search/searchServices', variables('searchServiceName'))]",
+        "[resourceId('Microsoft.CognitiveServices/accounts/deployments', variables('openAiName'), variables('embeddingDeploymentName'))]"
+      ],
+      "properties": {
+        "azCliVersion": "2.63.0",
+        "retentionInterval": "PT1H",
+        "timeout": "PT10M",
+        "environmentVariables": [
+          {
+            "name": "SEARCH_SERVICE_NAME",
+            "value": "[variables('searchServiceName')]"
+          },
+          {
+            "name": "SEARCH_ADMIN_KEY",
+            "secureValue": "[listAdminKeys(resourceId('Microsoft.Search/searchServices', variables('searchServiceName')), '2024-03-01-preview').primaryKey]"
+          },
+          {
+            "name": "INDEX_NAME",
+            "value": "[variables('searchIndexName')]"
+          },
+          {
+            "name": "OPENAI_RESOURCE_URI",
+            "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', variables('openAiName'))).endpoint]"
+          },
+          {
+            "name": "OPENAI_API_KEY",
+            "secureValue": "[listKeys(resourceId('Microsoft.CognitiveServices/accounts', variables('openAiName')), '2024-10-01').key1]"
+          }
+        ],
+        "scriptContent": "cat <<'INDEXJSON' > index.json\n{\n  \"name\": \"__INDEX_NAME__\",\n  \"fields\": [\n    {\"name\": \"id\", \"type\": \"Edm.String\", \"searchable\": false, \"filterable\": true, \"retrievable\": true, \"stored\": true, \"sortable\": false, \"facetable\": false, \"key\": true},\n    {\"name\": \"title\", \"type\": \"Edm.String\", \"searchable\": true, \"filterable\": false, \"retrievable\": true, \"stored\": true, \"sortable\": false, \"facetable\": false, \"key\": false},\n    {\"name\": \"sourceUrl\", \"type\": \"Edm.String\", \"searchable\": false, \"filterable\": false, \"retrievable\": true, \"stored\": true, \"sortable\": false, \"facetable\": false, \"key\": false},\n    {\"name\": \"content\", \"type\": \"Edm.String\", \"searchable\": true, \"filterable\": false, \"retrievable\": true, \"stored\": true, \"sortable\": false, \"facetable\": false, \"key\": false},\n    {\"name\": \"summary\", \"type\": \"Edm.String\", \"searchable\": true, \"filterable\": false, \"retrievable\": true, \"stored\": true, \"sortable\": false, \"facetable\": false, \"key\": false},\n    {\"name\": \"type\", \"type\": \"Edm.String\", \"searchable\": false, \"filterable\": true, \"retrievable\": true, \"stored\": true, \"sortable\": false, \"facetable\": false, \"key\": false},\n    {\"name\": \"createdAt\", \"type\": \"Edm.DateTimeOffset\", \"searchable\": false, \"filterable\": true, \"retrievable\": true, \"stored\": true, \"sortable\": true, \"facetable\": false, \"key\": false},\n    {\"name\": \"contentVector\", \"type\": \"Collection(Edm.Single)\", \"searchable\": true, \"filterable\": false, \"retrievable\": false, \"stored\": false, \"sortable\": false, \"facetable\": false, \"key\": false, \"dimensions\": 3072, \"vectorSearchProfile\": \"vector-profile\"}\n  ],\n  \"similarity\": {\"@odata.type\": \"#Microsoft.Azure.Search.BM25Similarity\"},\n  \"semantic\": {\n    \"configurations\": [{\n      \"name\": \"semantic-config\",\n      \"prioritizedFields\": {\n        \"titleField\": {\"fieldName\": \"title\"},\n        \"prioritizedContentFields\": [{\"fieldName\": \"content\"}, {\"fieldName\": \"summary\"}],\n        \"prioritizedKeywordsFields\": []\n      }\n    }]\n  },\n  \"vectorSearch\": {\n    \"algorithms\": [{\n      \"name\": \"hnsw-algo\",\n      \"kind\": \"hnsw\",\n      \"hnswParameters\": {\"metric\": \"cosine\", \"m\": 4, \"efConstruction\": 400, \"efSearch\": 500}\n    }],\n    \"profiles\": [{\n      \"name\": \"vector-profile\",\n      \"algorithm\": \"hnsw-algo\",\n      \"vectorizer\": \"openai-vectorizer\"\n    }],\n    \"vectorizers\": [{\n      \"name\": \"openai-vectorizer\",\n      \"kind\": \"azureOpenAI\",\n      \"azureOpenAIParameters\": {\n        \"resourceUri\": \"__OPENAI_URI__\",\n        \"deploymentId\": \"text-embedding-3-large\",\n        \"apiKey\": \"__OPENAI_KEY__\",\n        \"modelName\": \"text-embedding-3-large\"\n      }\n    }],\n    \"compressions\": []\n  }\n}\nINDEXJSON\nsed -i \"s|__INDEX_NAME__|${INDEX_NAME}|g\" index.json\nsed -i \"s|__OPENAI_URI__|${OPENAI_RESOURCE_URI}|g\" index.json\nsed -i \"s|__OPENAI_KEY__|${OPENAI_API_KEY}|g\" index.json\nHTTP_STATUS=$(curl -s -o response.txt -w \"%{http_code}\" -X PUT \"https://${SEARCH_SERVICE_NAME}.search.windows.net/indexes/${INDEX_NAME}?api-version=2024-07-01\" -H \"Content-Type: application/json\" -H \"api-key: ${SEARCH_ADMIN_KEY}\" -d @index.json)\nif [ \"$HTTP_STATUS\" -ge 200 ] && [ \"$HTTP_STATUS\" -lt 300 ]; then\n  echo \"Index created successfully (HTTP $HTTP_STATUS)\"\nelse\n  echo \"Failed to create index (HTTP $HTTP_STATUS)\"\n  cat response.txt\n  exit 1\nfi"
       }
     },
     {
@@ -922,9 +975,29 @@
                     }
                   }
                 },
-                "Push_To_AI_Search": {
+                "Get_Search_Key": {
                   "runAfter": {
                     "Generate_Embedding": [ "Succeeded" ]
+                  },
+                  "type": "Http",
+                  "inputs": {
+                    "uri": "[concat('https://', variables('keyVaultName'), '.vault.azure.net/secrets/', variables('searchAdminKeySecretName'), '?api-version=7.4')]",
+                    "method": "GET",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "audience": "https://vault.azure.net"
+                    }
+                  },
+                  "description": "Retrieve AI Search admin key from Key Vault using managed identity.",
+                  "runtimeConfiguration": {
+                    "secureData": {
+                      "properties": [ "outputs" ]
+                    }
+                  }
+                },
+                "Push_To_AI_Search": {
+                  "runAfter": {
+                    "Get_Search_Key": [ "Succeeded" ]
                   },
                   "type": "Http",
                   "inputs": {
@@ -932,7 +1005,7 @@
                     "method": "POST",
                     "headers": {
                       "Content-Type": "application/json",
-                      "api-key": "[listAdminKeys(resourceId('Microsoft.Search/searchServices', variables('searchServiceName')), '2024-03-01-preview').primaryKey]"
+                      "api-key": "@{body('Get_Search_Key')?['value']}"
                     },
                     "body": {
                       "value": [
@@ -1068,6 +1141,20 @@
       ],
       "properties": {
         "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAIUserRoleId'))]",
+        "principalId": "[reference(resourceId('Microsoft.Logic/workflows', variables('logicAppName')), '2019-05-01', 'Full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/providers/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[concat(variables('keyVaultName'), '/Microsoft.Authorization/', guid(resourceGroup().id, variables('keyVaultSecretsUserRoleId'), variables('logicAppName')))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+        "[resourceId('Microsoft.Logic/workflows', variables('logicAppName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultSecretsUserRoleId'))]",
         "principalId": "[reference(resourceId('Microsoft.Logic/workflows', variables('logicAppName')), '2019-05-01', 'Full').identity.principalId]",
         "principalType": "ServicePrincipal"
       }

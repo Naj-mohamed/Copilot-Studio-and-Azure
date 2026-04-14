@@ -28,29 +28,50 @@ This enables your Copilot to answer questions based on video content, not just t
 
 Deploy all required Azure resources with a single click:
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fgithub.com%2Fgokseloral%2FCopilot-Studio-and-Azure%2Fblob%2Fmain%2Faccelerators%2FVideo-RAG%2Fdeploy%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fgokseloral%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2FVideo-RAG%2Fdeploy%2Fazuredeploy.json)
 
-This ARM template deploys:
-- **Storage Account** with `uploadedvideocontent` blob container
-- **Azure AI Services** (Content Understanding) with gpt-4.1, gpt-4.1-mini, and text-embedding-3-large deployments
-- **Azure OpenAI** with text-embedding-3-large deployment
-- **Azure AI Search** service
-- **Logic App** with the complete video processing workflow and Event Grid trigger
-- **Managed Identity** (system-assigned on Logic App) with all required RBAC roles:
-  - Storage Blob Data Reader on Storage Account
-  - EventGrid EventSubscription Contributor on Storage Account
-  - Cognitive Services User on AI Services
-  - Cognitive Services OpenAI User on Azure OpenAI
+### What the ARM Template Deploys
+
+| Resource | Details |
+|----------|---------|
+| **Storage Account** | With `uploadedvideocontent` blob container for video uploads |
+| **Azure AI Services (Foundry)** | Content Understanding service with gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model deployments |
+| **Azure AI Foundry Hub & Project** | Hub workspace connected to AI Services, with a default project |
+| **Azure Key Vault** | Stores the AI Search admin key as a secret for secure access at runtime |
+| **Azure OpenAI** | Separate resource with text-embedding-3-large deployment for AI Search integrated vectorization |
+| **Azure AI Search** | Search service with the `video-training-index` automatically created (includes fields, HNSW vector search, semantic configuration, and OpenAI vectorizer) |
+| **Logic App** | Complete video processing workflow with Event Grid trigger, deployed from [logic-app-sample-code.json](setup-sample-code/logic-app-sample-code.json) with all resource URLs resolved |
+| **Event Grid API Connection** | Connects the Logic App trigger to Storage Account blob events |
+
+### Security & Managed Identity
+
+The Logic App is deployed with a **system-assigned managed identity**. All RBAC role assignments are configured automatically:
+
+| Role | Target Resource | Purpose |
+|------|----------------|---------|
+| Storage Blob Data Reader | Storage Account | Read uploaded video blobs |
+| EventGrid EventSubscription Contributor | Storage Account | Create event subscriptions for blob triggers |
+| Cognitive Services User | Azure AI Services | Call Content Understanding APIs |
+| Cognitive Services OpenAI User | Azure OpenAI | Generate vector embeddings |
+| Key Vault Secrets User | Azure Key Vault | Retrieve AI Search admin key at runtime |
+
+The AI Search admin key is stored in Key Vault and retrieved by the Logic App at runtime using managed identity, so no secrets are embedded in the workflow definition.
+
+### Template Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| **location** | Azure region (restricted to Content Understanding supported regions) | *(required)* |
+| **resourcePrefix** | Naming prefix for all resources (3-10 chars, lowercase) | `videorag` |
+| **searchServiceSku** | Pricing tier for AI Search | `basic` |
 
 ### Post-Deployment Steps
 
 After the ARM template completes:
 
-1. **Create the AI Search Index** - Use the [ai-search-index-schema.json](setup-sample-code/ai-search-index-schema.json) file to create the `video-training-index` index in your Search service. You can do this via the Azure portal Search Explorer or using the REST API.
+1. **Authorize the Event Grid Connection** - Navigate to the Logic App in the portal, open the designer, and re-authorize the Event Grid trigger connection if prompted.
 
-2. **Authorize the Event Grid Connection** - Navigate to the Logic App in the portal, open the designer, and re-authorize the Event Grid trigger connection if prompted.
-
-3. **Verify Model Deployments** - Confirm that gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model deployments are available in your selected region. If a model deployment failed, create it manually in the Azure AI Foundry portal.
+2. **Verify Model Deployments** - Confirm that gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model deployments are available in your selected region. If a model deployment failed, create it manually in the Azure AI Foundry portal.
 
 > **Note:** The template restricts region selection to regions that support Azure Content Understanding. See [region support](https://learn.microsoft.com/en-us/azure/ai-services/content-understanding/language-region-support#region-support).
 
