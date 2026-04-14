@@ -24,6 +24,38 @@ This enables your Copilot to answer questions based on video content, not just t
 
 ---
 
+## Automated Deployment
+
+Deploy all required Azure resources with a single click:
+
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FAzure%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2FVideo-RAG%2Fdeploy%2Fazuredeploy.json)
+
+This ARM template deploys:
+- **Storage Account** with `uploadedvideocontent` blob container
+- **Azure AI Services** (Content Understanding) with gpt-4.1, gpt-4.1-mini, and text-embedding-3-large deployments
+- **Azure OpenAI** with text-embedding-3-large deployment
+- **Azure AI Search** service
+- **Logic App** with the complete video processing workflow and Event Grid trigger
+- **Managed Identity** (system-assigned on Logic App) with all required RBAC roles:
+  - Storage Blob Data Reader on Storage Account
+  - EventGrid EventSubscription Contributor on Storage Account
+  - Cognitive Services User on AI Services
+  - Cognitive Services OpenAI User on Azure OpenAI
+
+### Post-Deployment Steps
+
+After the ARM template completes:
+
+1. **Create the AI Search Index** - Use the [ai-search-index-schema.json](setup-sample-code/ai-search-index-schema.json) file to create the `video-training-index` index in your Search service. You can do this via the Azure portal Search Explorer or using the REST API.
+
+2. **Authorize the Event Grid Connection** - Navigate to the Logic App in the portal, open the designer, and re-authorize the Event Grid trigger connection if prompted.
+
+3. **Verify Model Deployments** - Confirm that gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model deployments are available in your selected region. If a model deployment failed, create it manually in the Azure AI Foundry portal.
+
+> **Note:** The template restricts region selection to regions that support Azure Content Understanding. See [region support](https://learn.microsoft.com/en-us/azure/ai-services/content-understanding/language-region-support#region-support).
+
+---
+
 # 1) Prerequisites & What You'll Need
 
 ### Azure Subscription Requirements
