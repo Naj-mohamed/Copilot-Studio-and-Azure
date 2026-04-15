@@ -194,8 +194,6 @@ Optionally, verify that gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model 
    - **Resource group:** `VideoRAG-Project-RG`
    - **Service name:** `videorag-search`
 
-3. After creation, go to **Keys** and copy the **Primary admin key**
-
 ---
 
 # 3) Create AI Search Index
@@ -209,8 +207,6 @@ Optionally, verify that gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model 
 ## 3.2 Configure Fields
 
 Add the following fields as an example:
-
-
 
 ![Index Fields](images-samples/index.png)
 
@@ -229,6 +225,8 @@ Add the following fields as an example:
 ![Vectorizer](images-samples/vectorizer.jpg)
 
 4. Click **"Create"**
+
+> **Note:** If you used the ARM template, the AI Search index is created automatically. You can skip this section.
 
 ---
 
@@ -252,13 +250,17 @@ Add the following fields as an example:
 
 4. Note the **Object ID** for RBAC assignments
 
+> **Note:** If you used the ARM template, the managed identity is already enabled. You can skip this step.
+
 ---
 
 # 5) Configure Permissions (RBAC)
 
-The Logic App's Managed Identity needs access to Azure services.
+The Logic App's and AI Services' Managed Identities need access to Azure services.
 
-## 5.1 Grant Storage Access
+> **Note:** If you used the ARM template, all RBAC role assignments below are configured automatically. You can skip this section.
+
+## 5.1 Grant Storage Access (Logic App)
 
 1. Navigate to Storage Account → **"Access Control (IAM)"**
 2. Click **"+ Add"** → **"Add role assignment"**
@@ -267,34 +269,52 @@ The Logic App's Managed Identity needs access to Azure services.
    - **Assign to:** System identity
    - **Select:** Your Logic App
 
-## 5.2 Grant Foundry Access
+## 5.2 Grant Storage Access (AI Services)
+
+1. Navigate to Storage Account → **"Access Control (IAM)"**
+2. Add role assignment:
+   - **Role:** `Storage Blob Data Reader`
+   - **Select:** Your AI Services resource (Content Understanding needs to read video files)
+
+## 5.3 Grant Foundry Access
 
 1. Navigate to Foundry → **"Access Control (IAM)"**
 2. Add role assignment:
    - **Role:** `Cognitive Services User`
    - **Select:** Your Logic App
 
-
-## 5.3 Grant OpenAI Access
+## 5.4 Grant OpenAI Access
 
 1. Navigate to Azure OpenAI → **"Access Control (IAM)"**
 2. Add role assignment:
    - **Role:** `Cognitive Services OpenAI User`
    - **Select:** Your Logic App
 
+## 5.5 Grant Key Vault Access
+
+1. Navigate to Key Vault → **"Access Control (IAM)"**
+2. Add role assignment:
+   - **Role:** `Key Vault Secrets User`
+   - **Select:** Your Logic App
+
 ### Permission Summary
 
-| Resource | Role |
-|----------|------|
-| Storage Account | Storage Blob Data Reader |
-| Microsoft Foundry | Cognitive Services User |
-| Azure OpenAI | Cognitive Services OpenAI User |
+| Identity | Resource | Role |
+|----------|----------|------|
+| Logic App | Storage Account | Storage Blob Data Reader |
+| Logic App | Storage Account | EventGrid EventSubscription Contributor |
+| Logic App | Microsoft Foundry | Cognitive Services User |
+| Logic App | Azure OpenAI | Cognitive Services OpenAI User |
+| Logic App | Azure Key Vault | Key Vault Secrets User |
+| AI Services | Storage Account | Storage Blob Data Reader |
 
 > **Note:** Role assignments can take up to 10 minutes to propagate.
 
 ---
 
 # 6) Build the Logic App Workflow
+
+> **Note:** If you used the ARM template, the Logic App workflow is deployed automatically with all resource URLs and secrets resolved. You can skip to [Section 7 - Testing](#7-testing-the-solution). The steps below are for manual setup or reference.
 
 ## 6.1 Workflow Overview
 
@@ -310,7 +330,8 @@ The Logic App performs these steps:
                                                 │  3. Poll for Status  │
                                                 │  4. Extract Content  │
                                                 │  5. Generate Vector  │
-                                                │  6. Push to Search   │
+                                                │  6. Get Key from KV  │
+                                                │  7. Push to Search   │
                                                 └──────────────────────┘
 ```
 
@@ -323,8 +344,6 @@ The Logic App performs these steps:
    - **Resource Name:** Your storage account
    - **Event Type:** `Microsoft.Storage.BlobCreated`
 4. Add **Prefix Filter:** `/blobServices/default/containers/uploadedvideocontent`
-
-
 5. Click **Settings** (⋯) → Enable **Concurrency Control** → Set to `50`
 
 ## 6.3 Add Parse JSON (Parse Trigger)
@@ -332,76 +351,40 @@ The Logic App performs these steps:
 1. Click **"+ New step"** → Search **"Parse JSON"**
 2. Configure:
    - **Content:** Expression: `first(triggerBody())`
-   - **Schema:** example:
+   - **Schema:**
 
 ```json
 {
   "type": "object",
   "properties": {
-    "topic": {
-      "type": "string"
-    },
-    "subject": {
-      "type": "string"
-    },
-    "eventType": {
-      "type": "string"
-    },
-    "id": {
-      "type": "string"
-    },
+    "topic": { "type": "string" },
+    "subject": { "type": "string" },
+    "eventType": { "type": "string" },
+    "id": { "type": "string" },
     "data": {
       "type": "object",
       "properties": {
-        "api": {
-          "type": "string"
-        },
-        "clientRequestId": {
-          "type": "string"
-        },
-        "requestId": {
-          "type": "string"
-        },
-        "eTag": {
-          "type": "string"
-        },
-        "contentType": {
-          "type": "string"
-        },
-        "contentLength": {
-          "type": "integer"
-        },
-        "blobType": {
-          "type": "string"
-        },
-        "accessTier": {
-          "type": "string"
-        },
-        "url": {
-          "type": "string"
-        },
-        "sequencer": {
-          "type": "string"
-        },
+        "api": { "type": "string" },
+        "clientRequestId": { "type": "string" },
+        "requestId": { "type": "string" },
+        "eTag": { "type": "string" },
+        "contentType": { "type": "string" },
+        "contentLength": { "type": "integer" },
+        "blobType": { "type": "string" },
+        "accessTier": { "type": "string" },
+        "url": { "type": "string" },
+        "sequencer": { "type": "string" },
         "storageDiagnostics": {
           "type": "object",
           "properties": {
-            "batchId": {
-              "type": "string"
-            }
+            "batchId": { "type": "string" }
           }
         }
       }
     },
-    "dataVersion": {
-      "type": "string"
-    },
-    "metadataVersion": {
-      "type": "string"
-    },
-    "eventTime": {
-      "type": "string"
-    }
+    "dataVersion": { "type": "string" },
+    "metadataVersion": { "type": "string" },
+    "eventTime": { "type": "string" }
   }
 }
 ```
@@ -410,13 +393,14 @@ The Logic App performs these steps:
 
 ## 6.4 Initialize Variables
 
-Add **Initialize variable** actions for:
+Add **Initialize variable** actions for each variable (one per action):
 
 | Variable Name | Type | Value (Expression) |
 |---------------|------|-------------------|
 | `vBlobUrl` | String | `body('Parse_trigger_body')?['data']?['url']` |
 | `vBlobName` | String | `last(split(body('Parse_trigger_body')?['data']?['url'],'/'))` |
-| `vContainer` | String | `split(body('Parse_trigger_body')?['data']?['url'],'/')[3]}` |
+| `vContainer` | String | `split(body('Parse_trigger_body')?['data']?['url'],'/')[3]` |
+| `vDocumentId` | String | `base64(variables('vBlobUrl'))` |
 
 ![Initialize Variables](images-samples/blob-info.jpg)
 
@@ -446,7 +430,7 @@ Add **Initialize variable** actions for:
    - **Authentication:** System-assigned managed Identity
    - **Audience:** `https://cognitiveservices.azure.com`
 
-![Set Defaults]![Set Defaults](images-samples/set-defaults.jpg)
+![Set Defaults](images-samples/set-defaults.jpg)
 
 3. Rename to `Set_defaults`
 
@@ -472,43 +456,29 @@ Add **Initialize variable** actions for:
 
 ![Call Content Understanding](images-samples/call-content-understanding.jpg)
 
-1. Rename to `Call_Content_Understanding`
+3. Rename to `Call_Content_Understanding`
 
 ## 6.7 Parse CU Body
 
 1. Click **"+ New step"** → Search **"Parse JSON"**
 2. Configure:
    - **Content:** Expression: `body('Call_Content_Understanding')`
-   - **Schema:** example:
+   - **Schema:**
 
 ```json
 {
   "type": "object",
   "properties": {
-    "id": {
-      "type": "string"
-    },
-    "status": {
-      "type": "string"
-    },
+    "id": { "type": "string" },
+    "status": { "type": "string" },
     "result": {
       "type": "object",
       "properties": {
-        "analyzerId": {
-          "type": "string"
-        },
-        "apiVersion": {
-          "type": "string"
-        },
-        "createdAt": {
-          "type": "string"
-        },
-        "warnings": {
-          "type": "array"
-        },
-        "contents": {
-          "type": "array"
-        }
+        "analyzerId": { "type": "string" },
+        "apiVersion": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "warnings": { "type": "array" },
+        "contents": { "type": "array" }
       }
     }
   }
@@ -517,20 +487,19 @@ Add **Initialize variable** actions for:
 
 ## 6.8 Capture Operation Location
 
-1. Add **Set variable** action
+1. Add **Initialize variable** action
 2. Configure:
    - **Name:** `vOperationLocation`
+   - **Type:** String
    - **Value:** Expression: `outputs('Call_Content_Understanding')?['headers']?['Operation-Location']`
-
 
 ## 6.9 Capture Analyzer Status
 
-1. Add **Set variable** action
+1. Add **Initialize variable** action
 2. Configure:
    - **Name:** `vAnalyzerStatus`
    - **Type:** String
-   - **Value:** notStarted
-
+   - **Value:** `notStarted`
 
 ## 6.10 Add Polling Loop (Until)
 
@@ -581,27 +550,20 @@ Add **Initialize variable** actions for:
 1. Add **Parse JSON** action
 2. Configure:
    - **Content:** `@body('Check_Status')`
-   - **Schema:** Use comprehensive schema including `contents`, `transcriptPhrases`, `fields`
+   - **Schema:** Use the comprehensive schema from [logic-app-sample-code.json](setup-sample-code/logic-app-sample-code.json) (`Parse_Call_Result_JSON` action), which includes `contents`, `transcriptPhrases`, `fields`, `Summary`, and `usage` properties.
 
 3. Rename to `Parse_Call_Result_JSON`
 
-## 6.13 Capture Transcript Text
+## 6.13 Initialize Transcript and Summary Variables
 
-1. Add **Set variable** action
-2. Configure:
-   - **Name:** `vTranscriptText`
-   - **Type:** String
-   - **Value:** empty
+Add two **Initialize variable** actions:
 
-## 6.14 Capture Summary Text
+| Variable Name | Type | Value |
+|---------------|------|-------|
+| `vTranscriptText` | String | *(empty)* |
+| `vSummaryText` | String | *(empty)* |
 
-1. Add **Set variable** action
-2. Configure:
-   - **Name:** `vSummaryText`
-   - **Type:** String
-   - **Value:** empty
-
-## 6.15 Add For Each Loop (Extract Content)
+## 6.14 Add For Each Loop (Extract Content)
 
 1. Add **For each** action
 2. Set **From:** `@body('Parse_Call_Result_JSON')?['result']?['contents']`
@@ -622,7 +584,7 @@ Add **Initialize variable** actions for:
 
 ![For Each Content](images-samples/for-each-content.jpg)
 
-## 6.16 Add Content Check and Final Actions
+## 6.15 Add Content Check and Final Actions
 
 1. Add **Condition** to check content exists:
 ```
@@ -648,13 +610,18 @@ Add **Initialize variable** actions for:
 - **Authentication:** System-assigned managed Identity, Audience: `https://cognitiveservices.azure.com`
 - **Retry Policy:** Exponential, Count: 3
 
+**c) Get Search Key from Key Vault (HTTP)**
+- **Method:** `GET`
+- **URI:** `https://<your-keyvault>.vault.azure.net/secrets/search-admin-key?api-version=7.4`
+- **Authentication:** System-assigned Managed Identity, Audience: `https://vault.azure.net`
+- Enable **Secure Outputs** in settings to hide the key from run history
 
-**c) Push to AI Search (HTTP)**
+**d) Push to AI Search (HTTP)**
 - **Method:** `POST`
 - **URI:** `https://<your-search>.search.windows.net/indexes/video-training-index/docs/index?api-version=2024-07-01`
-- **Headers:** 
+- **Headers:**
   - `Content-Type: application/json`
-  - `api-key: <your-search-admin-key>`
+  - `api-key: @{body('Get_Search_Key')?['value']}`
 - **Body:**
 ```json
 {
@@ -673,15 +640,13 @@ Add **Initialize variable** actions for:
     ]
 }
 ```
-
-> **🔐 Production Tip:** In production environments, consider using **Managed Identity** instead of API keys for authenticating to AI Search. This eliminates the need to store and rotate secrets. See [Azure AI Search RBAC documentation](https://learn.microsoft.com/en-us/azure/search/search-security-rbac) for setup instructions.
-
+- **Retry Policy:** Exponential, Count: 3
 
 ### In False branch:
 
 Add **Terminate** with Failed status: `No transcript content extracted`
 
-## 6.17 Save the Logic App
+## 6.16 Save the Logic App
 
 Click **"Save"** in the toolbar.
 
