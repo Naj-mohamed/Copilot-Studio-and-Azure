@@ -28,7 +28,7 @@ This enables your Copilot to answer questions based on video content, not just t
 
 Deploy all required Azure resources with a single click:
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fgokseloral%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2FVideo-RAG%2Fdeploy%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FAzure%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2FVideo-RAG%2Fdeploy%2Fazuredeploy.json)
 
 ### What the ARM Template Deploys
 
@@ -124,10 +124,9 @@ Optionally, verify that gpt-4.1, gpt-4.1-mini, and text-embedding-3-large model 
 
 | File | Description |
 |------|-------------|
-| `VideoRAG_LogicApp.zip` | Exportable Logic App workflow |
 | `ai-search-index-schema.json` | AI Search index definition sample|
-| `readme.md` | This documentation |
-| `images-samples/` | Screenshot references |
+| `images-samples/` | Screenshot references|
+| `video-samples/` | Sample videos files about Microsoft Copilot Studio|
 
 > **Why Logic Apps?** Logic Apps provide a low-code way to orchestrate complex workflows with built-in connectors for Azure services, retry policies, and monitoring capabilities.
 
