@@ -20,7 +20,7 @@ This enables your Copilot to answer questions based on video content, not just t
 
 ### Video Walkthrough
 
-<video src="MCS-Azure-VideoRag.mp4" controls width="100%"></video>
+https://github.com/user-attachments/assets/b292dfcb-2ef4-4090-b398-90811e2422ef
 
 ### Design
 
