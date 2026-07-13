@@ -14,3 +14,7 @@ infra/
 .env.sample
 deploy.zip
 .python_packages/
+Policies and Procedures V4/
+copilot-studio-topics/
+images/
+deploy/

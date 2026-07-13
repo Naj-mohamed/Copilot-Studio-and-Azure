@@ -31,6 +31,8 @@ param(
   [string] $ResourceGroup,
   [string] $SubscriptionId,
   [string] $DeploymentName,
+  [string] $BaseName,
+  [string] $AiAccountName,
   [string] $ConnectorDisplayName = 'Azure Content Understanding (Private)',
   [switch] $SkipConnectorCreate,
   [switch] $InsideVnetTest
@@ -73,15 +75,53 @@ if (Test-Path $OutputsFile) {
   # Fallback: query the RG directly for the AI Services account.
   if (-not $aiName) {
     Write-Host "==> Discovering AIServices account in resource group $ResourceGroup" -ForegroundColor Cyan
-    $accounts = az cognitiveservices account list -g $ResourceGroup --query "[?kind=='AIServices'].{name:name, endpoint:properties.endpoint}" -o json | ConvertFrom-Json
+    $accounts = @(az cognitiveservices account list -g $ResourceGroup --query "[?kind=='AIServices'].{name:name, endpoint:properties.endpoint}" -o json | ConvertFrom-Json)
     if (-not $accounts -or $accounts.Count -eq 0) {
       throw "No 'AIServices' account found in resource group '$ResourceGroup'. Verify the deployment finished and -ResourceGroup is correct."
     }
+
     if ($accounts.Count -gt 1) {
-      throw "Multiple AIServices accounts found in '$ResourceGroup': $(( $accounts | ForEach-Object { $_.name }) -join ', '). Re-run with -OutputsFile or narrow the resource group."
+      # Multiple AIServices accounts in the RG (e.g. several deployments share it).
+      # Disambiguate by an explicit -AiAccountName, or by the BASE_NAME the account
+      # was derived from (the template names it 'ais-<baseName>-<hash>').
+      if (-not $BaseName -and $env:BASE_NAME) { $BaseName = $env:BASE_NAME }
+      if (-not $BaseName) {
+        $envFile = Join-Path (Split-Path -Parent $PSScriptRoot) '.env'
+        if (Test-Path $envFile) {
+          $match = (Select-String -Path $envFile -Pattern '^\s*BASE_NAME\s*=\s*(.+)$' | Select-Object -First 1)
+          if ($match) { $BaseName = $match.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'") }
+        }
+      }
+
+      $selected = $null
+      if ($AiAccountName) {
+        $selected = $accounts | Where-Object { $_.name -eq $AiAccountName }
+        if (-not $selected) {
+          throw "AIServices account '$AiAccountName' not found in '$ResourceGroup'. Available: $(( $accounts | ForEach-Object { $_.name }) -join ', ')."
+        }
+      }
+      elseif ($BaseName) {
+        $selected = @($accounts | Where-Object { $_.name -like "ais-$BaseName-*" })
+        if ($selected.Count -eq 0) {
+          throw "No AIServices account matching BASE_NAME '$BaseName' (pattern 'ais-$BaseName-*') found in '$ResourceGroup'. Available: $(( $accounts | ForEach-Object { $_.name }) -join ', '). Pass -AiAccountName to select one explicitly."
+        }
+        if ($selected.Count -gt 1) {
+          throw "Multiple AIServices accounts match BASE_NAME '$BaseName' in '$ResourceGroup': $(( $selected | ForEach-Object { $_.name }) -join ', '). Pass -AiAccountName to select one explicitly."
+        }
+        $selected = $selected[0]
+      }
+      else {
+        throw "Multiple AIServices accounts found in '$ResourceGroup': $(( $accounts | ForEach-Object { $_.name }) -join ', '). Re-run with -AiAccountName <name>, -BaseName <baseName>, set BASE_NAME in .env, or use -OutputsFile."
+      }
+
+      $aiName     = $selected.name
+      $aiEndpoint = $selected.endpoint
+      Write-Host "==> Selected AIServices account '$aiName' from $($accounts.Count) candidates." -ForegroundColor Green
     }
-    $aiName     = $accounts[0].name
-    $aiEndpoint = $accounts[0].endpoint
+    else {
+      $aiName     = $accounts[0].name
+      $aiEndpoint = $accounts[0].endpoint
+    }
   }
 
   $rg    = $ResourceGroup

@@ -46,7 +46,7 @@ What you get when you finish the steps below:
 | [`pac` CLI](https://learn.microsoft.com/power-platform/developer/cli/introduction#install-microsoft-power-platform-cli) signed in to the target PP environment | `pac auth list` |
 | [`Microsoft.PowerPlatform.EnterprisePolicies` PowerShell module](https://www.powershellgallery.com/packages/Microsoft.PowerPlatform.EnterprisePolicies) | auto-installed by `link-enterprise-policy.ps1` |
 | [Power Platform / Global Administrator](https://learn.microsoft.com/power-platform/admin/use-service-admin-role-manage-tenant) | required to enable Managed Environment + link the policy |
-| Target environment is a [**Managed Environment**](https://learn.microsoft.com/power-platform/admin/managed-environment-overview) | Sandbox is not allowed; enable in PPAC |
+| Target environment has [**Managed Environment**](https://learn.microsoft.com/power-platform/admin/managed-environment-overview) enabled | Required for VNet injection; enable in PPAC (applies to Production or Sandbox type environments) |
 
 ### Deployment
 
@@ -57,7 +57,7 @@ All scripts and the `.env.example` file live under
 before running any of the steps below.
 
 ```powershell
-git clone https://github.com/gokseloral/Copilot-Studio-and-Azure.git
+git clone https://github.com/Azure/Copilot-Studio-and-Azure.git
 cd Copilot-Studio-and-Azure/accelerators/private-endpoint/content-server
 ```
 
@@ -94,7 +94,7 @@ You have two options to provision the azure infrastructure. Pick **one** of them
 
 #### Option A — One-click ARM deploy (recommended)
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fgokseloral%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2Fprivate-endpoint%2Fcontent-server%2Finfra%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FAzure%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2Fprivate-endpoint%2Fcontent-server%2Finfra%2Fazuredeploy.json)
 
 The portal blade collects:
 
@@ -190,6 +190,12 @@ The script resolves the deployed AI Services account from the resource group
 patches the swagger `host`, pushes the connector via `pac`, and then calls
 `GET /contentunderstanding/analyzers?api-version=<preview>` directly against
 the AI Services endpoint:
+
+> **Multiple AI Services accounts in the same resource group?** The script
+> derives the right account from your `BASE_NAME` (accounts are named
+> `ais-<baseName>-<hash>`). It reads `BASE_NAME` from `.env` automatically, or
+> you can pass it explicitly with `-BaseName <baseName>`. To target a specific
+> account by full name, use `-AiAccountName <name>`.
 
 | Run from | Expected | Meaning |
 | --- | --- | --- |

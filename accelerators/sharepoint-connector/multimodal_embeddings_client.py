@@ -130,7 +130,12 @@ class MultimodalEmbeddingsClient:
             return None
         return self._post(self._url("vectorizeText"), {"text": text}, "application/json")
 
-    def vectorize_image(self, image_bytes: bytes, mime: str = "image/png") -> list[float] | None:
+    def vectorize_image(
+        self,
+        image_bytes: bytes,
+        mime: str = "image/png",
+        neighbour_text: str = "",  # ignored — Florence embeds the raw image bytes directly
+    ) -> list[float] | None:
         if not image_bytes:
             return None
         return self._post(self._url("vectorizeImage"), image_bytes, mime)

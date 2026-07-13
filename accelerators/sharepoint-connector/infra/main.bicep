@@ -36,7 +36,7 @@ extension microsoftGraphV1_0
 @maxLength(16)
 param baseName string
 
-@description('Azure region. Pick one that supports Azure AI Vision multimodal 4.0 (see Microsoft Learn for the current list).')
+@description('Azure region. Azure OpenAI (text-embedding-3-large / gpt-4o) and Azure AI Search are available in Canada Central and most Azure regions. Check Microsoft Learn for per-service availability if you need additional services.')
 param location string = resourceGroup().location
 
 @description('Full SharePoint site URL the connector will monitor, e.g. https://contoso.sharepoint.com/sites/YourSite')
@@ -47,6 +47,9 @@ param enableSecurityTrimming bool = false
 
 @description('Optional escape hatch — only relevant when enableSecurityTrimming = true. When empty, the template creates the Entra app registration itself via the Microsoft Graph Bicep extension (deployer needs `Application Administrator`). When non-empty, the template skips creating the app and uses this client ID instead — useful when the deployer lacks Graph privileges and an admin has pre-created the app via infra/create-api-app-registration.ps1. Accepts a bare GUID or an `api://<clientId>` URI.')
 param apiAudience string = ''
+
+@description('Locale (BCP-47 language tag) for Azure Speech video transcription. Defaults to en-US. Video files (.mp4/.mov/.avi/.mkv/.wmv/.m4v/.webm) are transcribed via the Azure Speech Fast Transcription API using the same Foundry AIServices account as Azure OpenAI — no extra resource needed and works in Canada Central. To disable video indexing, remove video extensions from INDEXED_EXTENSIONS after deployment.')
+param speechLocale string = 'en-US'
 
 @description('Optional — bring-your-own (BYO) storage account. When empty (default), the template creates a new storage account. When set to a full ARM resource ID (e.g. /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>), the template skips creating the main storage account and uses the existing one for AzureWebJobsStorage and the Function App deployment cache. The BYO account MUST already contain these child resources (created out-of-band): blob containers app-package, state, images, backup; queues sp-indexer-q, sp-indexer-q-poison; tables failedFiles, runState, watermark. The deployer also needs User Access Administrator (or Owner) on the resource group of the BYO storage account so role assignments can be created.')
 param existingStorageAccountResourceId string = ''
@@ -66,7 +69,7 @@ var existingStorageName = useExistingStorage ? last(split(existingStorageAccount
 // of deployers should use the official release; fork-users can edit this
 // line directly OR flip the app setting `WEBSITE_RUN_FROM_PACKAGE`-style
 // override post-deploy.
-var packageReleaseUrl = 'https://github.com/gokseloral/Copilot-Studio-and-Azure/releases/download/sharepoint-connector-latest/sharepoint-connector.zip'
+var packageReleaseUrl = 'https://github.com/Azure/Copilot-Studio-and-Azure/releases/download/sharepoint-connector-latest/sharepoint-connector.zip'
 
 var searchIndexName = 'sharepoint-index'
 var indexerSchedule = '0 0 * * * *'            // every hour
@@ -78,7 +81,12 @@ var startDate = ''
 var sharePointLibraries = ''                   // empty = all libraries
 var sharePointRootPaths = ''                   // empty = whole library
 
-var indexedExtensions = '.pdf,.docx,.docm,.xlsx,.xlsm,.pptx,.pptm,.txt,.md,.csv,.json,.xml,.kml,.html,.htm,.rtf,.eml,.epub,.msg,.odt,.ods,.odp,.zip,.gz,.png,.jpg,.jpeg,.tiff,.bmp'
+// Metadata filter — comma-separated column=value pairs (AND logic, case-insensitive).
+// Example: 'DocumentStatusTX=Approved' indexes only files with that column value.
+// Leave empty to index all files regardless of metadata.
+var metadataFilters = ''
+
+var indexedExtensions = '.pdf,.docx,.docm,.xlsx,.xlsm,.pptx,.pptm,.txt,.md,.csv,.json,.xml,.kml,.html,.htm,.rtf,.eml,.epub,.msg,.vsdx,.vsd,.odt,.ods,.odp,.zip,.gz,.png,.jpg,.jpeg,.tiff,.bmp,.mp4,.mov,.avi,.mkv,.wmv,.m4v,.webm'
 var maxFileSizeMb = 500
 var vectoriseConcurrency = 8
 var multimodalMaxInFlight = 8
@@ -86,7 +94,21 @@ var reconcileEveryNRuns = 24
 
 var functionProcessingMode = 'queue'
 var instanceMemoryMB = 4096
-var multimodalModelVersion = '2023-04-15'
+
+// Azure OpenAI model deployments on the Foundry (AIServices) account.
+// text-embedding-3-large (3072d) for all content; gpt-4o for image captioning.
+var embeddingModelName = 'text-embedding-3-large'
+var embeddingModelVersion = '1'
+var embeddingDeploymentName = 'text-embedding-3-large'
+var embeddingDimensions = 3072
+var visionModelName = 'gpt-5.1'
+// NOTE: base gpt-4o is no longer offered with the GlobalStandard SKU in
+// Canada Central (only finetune/transcribe variants remain), and the
+// gpt-5.1-chat variant has entered deprecation (cannot be used for new
+// deployments). gpt-5.1 (full) is the current multimodal model with
+// GlobalStandard capacity in Canada Central and accepts image inputs.
+var visionModelVersion = '2025-11-13'
+var visionDeploymentName = 'gpt-5.1'
 
 var imagesContainerName = 'images'
 var extractImages = true
@@ -353,7 +375,9 @@ resource searchService 'Microsoft.Search/searchServices@2024-06-01-preview' = {
 }
 
 // ============================================================================
-// Foundry / Azure AI Services (multi-service) — hosts Vision multimodal
+// Foundry / Azure AI Services (multi-service) — hosts Azure OpenAI
+// text-embedding-3-large and gpt-4o model deployments.
+// (Florence Vision multimodal is NOT required and NOT deployed.)
 // ============================================================================
 
 resource foundryAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
@@ -368,8 +392,40 @@ resource foundryAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
   identity: { type: 'SystemAssigned' }
 }
 
-// ============================================================================
-// Document Intelligence — Layout model for PDF/Office extraction (mandatory)
+// text-embedding-3-large (3072d) — used for all chunk types (text and captioned images).
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+  parent: foundryAccount
+  name: embeddingDeploymentName
+  sku: {
+    name: 'GlobalStandard'
+    capacity: 100   // 100K TPM; adjust in portal after deployment if quota is constrained
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: embeddingModelName
+      version: embeddingModelVersion
+    }
+  }
+}
+
+// gpt-4o — captions standalone images so they can be found by text queries.
+resource visionDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
+  parent: foundryAccount
+  name: visionDeploymentName
+  sku: {
+    name: 'GlobalStandard'
+    capacity: 10    // 10K TPM; image captioning is infrequent relative to text embedding
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: visionModelName
+      version: visionModelVersion
+    }
+  }
+  dependsOn: [ embeddingDeployment ]  // sequential to avoid simultaneous-deployment quota errors
+}
 // ============================================================================
 
 resource docIntel 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
@@ -485,13 +541,20 @@ resource deployerSearchRole 'Microsoft.Authorization/roleAssignments@2022-04-01'
 }
 
 // Index schema lives in infra/sharepoint-index.json — single source of truth.
-// Bicep substitutes the two runtime placeholders (foundry endpoint + model
-// version) at compile time so the script doesn't need a multi-line env var
-// (multi-line env vars caused empty-log container failures earlier).
+// Bicep substitutes the runtime placeholders (Azure OpenAI endpoint, embedding
+// deployment name, model name, and dimension count) at compile time.
 var indexSchema = replace(
-  replace(loadTextContent('sharepoint-index.json'), '__MULTIMODAL_ENDPOINT__', foundryEndpoint),
-  '__MULTIMODAL_MODEL_VERSION__',
-  multimodalModelVersion
+  replace(
+    replace(
+      replace(
+        loadTextContent('sharepoint-index.json'),
+        '__AZURE_OPENAI_ENDPOINT__', foundryEndpoint
+      ),
+      '__AZURE_OPENAI_EMBEDDING_DEPLOYMENT__', embeddingDeploymentName
+    ),
+    '__AZURE_OPENAI_EMBEDDING_MODEL__', embeddingModelName
+  ),
+  '__EMBEDDING_DIMENSIONS__', string(embeddingDimensions)
 )
 
 var createIndexScriptTemplate = '''
@@ -649,6 +712,9 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'START_DATE', value: startDate }
         { name: 'FUNCTION_PROCESSING_MODE', value: functionProcessingMode }
 
+        // Metadata filter — comma-separated col=val pairs; empty = no filter
+        { name: 'METADATA_FILTERS', value: metadataFilters }
+
         // Large file handling + concurrency
         { name: 'MAX_FILE_SIZE_MB', value: string(maxFileSizeMb) }
         { name: 'MAX_CONCURRENCY', value: '4' }
@@ -670,12 +736,26 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'BACKUP_CONTAINER', value: backupContainerName }
         { name: 'BACKUP_RETENTION_DAYS', value: string(backupRetentionDays) }
 
-        // Multimodal embeddings + Document Intelligence (both always created)
-        { name: 'MULTIMODAL_ENDPOINT', value: foundryEndpoint }
-        { name: 'MULTIMODAL_MODEL_VERSION', value: multimodalModelVersion }
+        // Azure OpenAI embeddings + GPT-4o image captioning
+        // (Azure OpenAI is used in preference to Florence; works in all regions
+        //  including Canada Central where Florence is not available.)
+        { name: 'AZURE_OPENAI_ENDPOINT', value: foundryEndpoint }
+        { name: 'AZURE_OPENAI_EMBEDDING_MODEL', value: embeddingDeploymentName }
+        { name: 'AZURE_OPENAI_VISION_MODEL', value: visionDeploymentName }
+        { name: 'AZURE_OPENAI_EMBEDDING_DIMENSIONS', value: string(embeddingDimensions) }
+        // Florence fallback — leave empty; Azure OpenAI takes priority when
+        // AZURE_OPENAI_ENDPOINT is set. Remove this line and set MULTIMODAL_ENDPOINT
+        // to the foundry endpoint only if deploying to a Florence-enabled region
+        // without Azure OpenAI quota.
+        { name: 'MULTIMODAL_ENDPOINT', value: '' }
         { name: 'DOCINTEL_ENDPOINT', value: docIntelEndpoint }
         { name: 'IMAGES_CONTAINER', value: imagesContainerName }
         { name: 'EXTRACT_IMAGES', value: extractImages ? 'true' : 'false' }
+
+        // Speech Transcription for video files — reuses the Foundry/AIServices
+        // account endpoint above. Works in Canada Central (unlike Content Understanding).
+        // Set SPEECH_LOCALE to the primary spoken language of your video content.
+        { name: 'SPEECH_LOCALE', value: speechLocale }
 
         // Query-time security trimming (/api/search, called from OnKnowledgeRequested topic)
         { name: 'API_AUDIENCE', value: effectiveApiClientId }
@@ -714,10 +794,10 @@ resource searchServiceContributorAssignment 'Microsoft.Authorization/roleAssignm
   }
 }
 
-// Foundry / AI Services (Vision multimodal) — Function App's MI for indexing-time
-// embeddings, AND the Search service's MI for query-time vectorization (the
-// registered aiServicesVision vectorizer on the index calls Foundry as the
-// search service's MI when Copilot Studio submits text-only queries).
+// Foundry / AI Services (Azure OpenAI) — Function App's MI for indexing-time
+// embeddings + captioning, AND the Search service's MI for query-time
+// vectorization (the registered azureOpenAI vectorizer on the index calls
+// Foundry as the search service's MI when Copilot Studio submits text queries).
 resource foundryAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(foundryAccount.id, cognitiveServicesUserRoleId, functionApp.id)
   scope: foundryAccount
@@ -966,7 +1046,7 @@ resource publishCode 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
       if [ -z "$DEPLOY_OK" ]; then
         echo "ERROR: code deploy failed via both 'az functionapp deployment source config-zip' and POST /api/publish." >&2
         echo "Resources are provisioned correctly — finish the deploy manually:" >&2
-        echo "  cd accelerators/sharepoint-connector" >&2
+        echo "  cd sharepoint-connector" >&2
         echo "  func azure functionapp publish $FUNCTION_APP_NAME --python --build remote" >&2
         echo "See README section S1 for details." >&2
         exit 1
