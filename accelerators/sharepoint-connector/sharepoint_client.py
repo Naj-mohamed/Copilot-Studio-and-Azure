@@ -11,6 +11,7 @@ Provides methods to:
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -20,13 +21,37 @@ import httpx
 from azure.identity import DefaultAzureCredential, ClientSecretCredential
 from azure.core.credentials import TokenCredential
 
-from config import EntraConfig, SharePointConfig
+from config import EntraConfig, SharePointConfig, MetadataFilterConfig
 
 logger = logging.getLogger(__name__)
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 GRAPH_BETA = "https://graph.microsoft.com/beta"
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
+
+
+def _matches_metadata_filter(fields: dict, mf: "MetadataFilterConfig") -> bool:
+    """Return ``True`` if *all* configured conditions match.
+
+    Each condition is ``(column, op, value)`` where ``op`` is ``"="`` (equals)
+    or ``"<>"`` (not-equals). Comparison is case-insensitive for values; column
+    names are used verbatim (they must match the internal SharePoint column
+    name exactly).
+
+    Args:
+        fields: Dict of ``{column_name: value}`` from the SharePoint list item.
+        mf: The MetadataFilterConfig to evaluate.
+    """
+    for column, op, expected in mf.filters:
+        actual = str(fields.get(column, "")).strip()
+        equal = actual.lower() == expected.lower()
+        if op == "<>":
+            if equal:
+                return False
+        else:  # "="
+            if not equal:
+                return False
+    return True
 
 
 @dataclass
@@ -168,14 +193,26 @@ class SharePointClient:
         folder_path: str = "root",
         modified_since: datetime | None = None,
         extensions: list[str] | None = None,
+        metadata_filter: MetadataFilterConfig | None = None,
     ) -> list[dict]:
         """
         Recursively list all files in a drive/folder.
-        Optionally filter by last modified date and file extension.
+        Optionally filter by last modified date, file extension, and
+        SharePoint column metadata.
+
+        When `metadata_filter` is active, the Graph request expands each
+        item's ``listItem`` so column values arrive in the same response
+        (no extra per-item round-trip).
         """
         url = f"{GRAPH_BASE}/drives/{drive_id}/root/children"
         if folder_path and folder_path != "root":
             url = f"{GRAPH_BASE}/drives/{drive_id}/root:/{folder_path}:/children"
+
+        # Expand list-item fields in a single Graph call when the metadata
+        # filter is configured, so we don't need a follow-up request per file.
+        if metadata_filter and metadata_filter.enabled:
+            columns = ",".join(col for col, _op, _val in metadata_filter.filters)
+            url = f"{url}?$expand=listItem($expand=fields($select={columns}))"
 
         all_items = self._get_all_pages(url)
         files: list[dict] = []
@@ -185,7 +222,9 @@ class SharePointClient:
                 # Recurse into subfolders
                 subfolder = item.get("parentReference", {}).get("path", "").split("root:")[-1].lstrip("/")
                 subfolder_path = f"{subfolder}/{item['name']}" if subfolder else item["name"]
-                files.extend(self.list_files(drive_id, subfolder_path, modified_since, extensions))
+                files.extend(self.list_files(
+                    drive_id, subfolder_path, modified_since, extensions, metadata_filter
+                ))
             elif "file" in item:
                 # Filter by extension
                 name = item.get("name", "")
@@ -202,6 +241,15 @@ class SharePointClient:
                         if last_mod < modified_since:
                             continue
 
+                # Metadata filter — fields arrive via the $expand above
+                if metadata_filter and metadata_filter.enabled:
+                    fields = item.get("listItem", {}).get("fields", {})
+                    if not _matches_metadata_filter(fields, metadata_filter):
+                        logger.debug(
+                            f"Skipping {name}: metadata filter not matched {fields}"
+                        )
+                        continue
+
                 files.append(item)
 
         return files
@@ -211,6 +259,7 @@ class SharePointClient:
         modified_since: datetime | None = None,
         extensions: list[str] | None = None,
         root_paths: list[str] | None = None,
+        metadata_filter: MetadataFilterConfig | None = None,
     ) -> list[dict]:
         """List files across all target drives.
 
@@ -218,6 +267,9 @@ class SharePointClient:
         root. When it contains folder paths (relative to drive root), each
         drive is scanned only under those folders — useful for scoping the
         indexer to a subset of the library.
+
+        When `metadata_filter` is set, only files matching all configured
+        column=value conditions are returned.
         """
         drives = self.get_target_drives()
         all_files: list[dict] = []
@@ -227,7 +279,9 @@ class SharePointClient:
             drive_id = drive["id"]
             drive_name = drive.get("name", drive_id)
             for folder in folders:
-                files = self.list_files(drive_id, folder, modified_since, extensions)
+                files = self.list_files(
+                    drive_id, folder, modified_since, extensions, metadata_filter
+                )
                 logger.info(
                     f"Drive '{drive_name}' folder '{folder}': found {len(files)} files"
                 )
@@ -248,6 +302,7 @@ class SharePointClient:
         drive_id: str,
         delta_token: str | None,
         extensions: list[str] | None = None,
+        metadata_filter: MetadataFilterConfig | None = None,
     ) -> tuple[list[dict], list[str], str | None]:
         """Enumerate changes on a drive via the Graph delta query.
 
@@ -256,6 +311,10 @@ class SharePointClient:
             delta_token: Previous delta token (use the full @odata.deltaLink URL
                 OR just the token). Pass None on first run to get all items.
             extensions: Optional extension filter (applied client-side).
+            metadata_filter: Optional column-value filter. When set, each
+                candidate modified item is checked by fetching its list-item
+                fields (one extra Graph call per candidate). Files that don't
+                match are dropped before being enqueued.
 
         Returns:
             (modified_items, deleted_item_ids, next_delta_token)
@@ -299,6 +358,18 @@ class SharePointClient:
                     if ext not in extensions:
                         continue
 
+                # Metadata filter — the delta endpoint doesn't support $expand,
+                # so we fetch list-item fields individually. Delta results are
+                # only the *changed* items since last run, so this is a small set.
+                if metadata_filter and metadata_filter.enabled:
+                    columns = ",".join(col for col, _op, _val in metadata_filter.filters)
+                    fields = self._get_list_item_fields(drive_id, item["id"], columns)
+                    if not _matches_metadata_filter(fields, metadata_filter):
+                        logger.debug(
+                            f"Delta: skipping {name}: metadata filter not matched"
+                        )
+                        continue
+
                 item["_drive_id"] = drive_id
                 modified.append(item)
 
@@ -317,6 +388,7 @@ class SharePointClient:
         self,
         delta_tokens: dict[str, str] | None = None,
         extensions: list[str] | None = None,
+        metadata_filter: MetadataFilterConfig | None = None,
     ) -> tuple[list[dict], list[str], dict[str, str]]:
         """Run `list_changes_via_delta` across every target drive.
 
@@ -335,7 +407,7 @@ class SharePointClient:
             token = delta_tokens.get(drive_id)
             try:
                 modified, deleted, next_token = self.list_changes_via_delta(
-                    drive_id, token, extensions
+                    drive_id, token, extensions, metadata_filter
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Delta query failed for drive '{drive_name}': {e}")
@@ -380,20 +452,108 @@ class SharePointClient:
             return resp.content
         raise RuntimeError(f"Download failed after {max_retries} retries: {item_id}")
 
-    def download_file_to_path(
+    # ------------------------------------------------------------------
+    # Published (major) version selection
+    # ------------------------------------------------------------------
+
+    def get_item_versions(self, drive_id: str, item_id: str) -> list[dict]:
+        """Return all stored versions for a drive item (newest first).
+
+        Each version dict has an ``id`` that mirrors the SharePoint UI version
+        string, e.g. ``"3.0"`` for a published major version or ``"3.2"`` for a
+        draft/minor version. Returns an empty list on error.
+        """
+        url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/versions"
+        try:
+            return self._get_all_pages(url)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not list versions for item {item_id}: {e}")
+            return []
+
+    @staticmethod
+    def _latest_published_version_id(versions: list[dict]) -> str | None:
+        """Pick the highest whole-number (``X.0``) version id from *versions*.
+
+        A published major version always ends in ``.0``; draft/minor versions
+        have a non-zero minor part (``X.1``, ``X.2`` ...). Returns ``None`` when
+        the item has never been published (drafts only).
+        """
+        best_major = -1
+        best_id: str | None = None
+        for v in versions:
+            vid = str(v.get("id", ""))
+            if re.fullmatch(r"\d+\.0", vid):
+                major = int(vid.split(".", 1)[0])
+                if major > best_major:
+                    best_major = major
+                    best_id = vid
+        return best_id
+
+    @staticmethod
+    def _is_current_version(versions: list[dict], version_id: str) -> bool:
+        """Return ``True`` when *version_id* is the item's current version.
+
+        Graph returns versions newest-first, so the first entry is the current
+        version. The ``/versions/{id}/content`` endpoint returns HTTP 400 for the
+        current version — callers must use the driveItem ``/content`` endpoint
+        instead (see download_published_version_to_path).
+        """
+        if not versions:
+            return False
+        return str(versions[0].get("id", "")) == version_id
+
+    def download_published_version(self, drive_id: str, item_id: str) -> bytes | None:
+        """Download the content of the latest published major version.
+
+        Returns the version bytes, or ``None`` when the item has no published
+        major version (so the caller can decide how to fall back).
+        """
+        versions = self.get_item_versions(drive_id, item_id)
+        version_id = self._latest_published_version_id(versions)
+        if not version_id:
+            return None
+
+        # See download_published_version_to_path: the /versions/{id}/content
+        # endpoint returns HTTP 400 for the current version, so fall back to the
+        # driveItem /content endpoint when the published major is current.
+        if self._is_current_version(versions, version_id):
+            url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content"
+        else:
+            url = (
+                f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+                f"/versions/{version_id}/content"
+            )
+        max_retries = 5
+        for attempt in range(max_retries):
+            resp = self._http.get(url, headers=self._headers(), follow_redirects=True)
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 5))
+                logger.warning(f"Version download rate limited (429). Retrying in {retry_after}s")
+                time.sleep(retry_after)
+                continue
+            if resp.status_code >= 500:
+                wait = min(2 ** attempt, 30)
+                logger.warning(f"Version download server error {resp.status_code}. Retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            logger.debug(f"Downloaded published version {version_id} of item {item_id}")
+            return resp.content
+        raise RuntimeError(
+            f"Published version download failed after {max_retries} retries: {item_id}"
+        )
+
+    def _stream_url_to_path(
         self,
-        drive_id: str,
-        item_id: str,
+        url: str,
         dest_path: str,
+        item_id: str,
         chunk_size: int = 4 * 1024 * 1024,
     ) -> int:
-        """
-        Stream file content from SharePoint directly to a local path.
-        Memory-bounded regardless of file size.
+        """Stream content from *url* to *dest_path*. Memory-bounded.
 
         Returns the number of bytes written.
         """
-        url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content"
         max_retries = 5
         for attempt in range(max_retries):
             try:
@@ -422,6 +582,59 @@ class SharePointClient:
                 logger.warning(f"Download transient error: {e}. Retrying in {wait}s")
                 time.sleep(wait)
         raise RuntimeError(f"Streaming download failed after {max_retries} retries: {item_id}")
+
+    def download_file_to_path(
+        self,
+        drive_id: str,
+        item_id: str,
+        dest_path: str,
+        chunk_size: int = 4 * 1024 * 1024,
+    ) -> int:
+        """
+        Stream file content from SharePoint directly to a local path.
+        Memory-bounded regardless of file size.
+
+        Returns the number of bytes written.
+        """
+        url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content"
+        return self._stream_url_to_path(url, dest_path, item_id, chunk_size)
+
+    def download_published_version_to_path(
+        self,
+        drive_id: str,
+        item_id: str,
+        dest_path: str,
+        chunk_size: int = 4 * 1024 * 1024,
+    ) -> int | None:
+        """Stream the latest published major version to *dest_path*.
+
+        Memory-bounded. Returns the number of bytes written, or ``None`` when the
+        item has no published major version (so the caller can fall back to the
+        current content).
+        """
+        versions = self.get_item_versions(drive_id, item_id)
+        version_id = self._latest_published_version_id(versions)
+        if not version_id:
+            return None
+
+        # Graph rejects /versions/{id}/content with HTTP 400 when the requested
+        # version is the item's CURRENT version. In that case (no newer draft
+        # exists, so the published major == current) download via the regular
+        # driveItem /content endpoint, which returns the same published bytes.
+        if self._is_current_version(versions, version_id):
+            url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/content"
+            logger.debug(
+                f"Published version {version_id} is current for item {item_id}; "
+                "using driveItem /content endpoint"
+            )
+        else:
+            url = (
+                f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}"
+                f"/versions/{version_id}/content"
+            )
+        bytes_written = self._stream_url_to_path(url, dest_path, item_id, chunk_size)
+        logger.debug(f"Streamed published version {version_id} of item {item_id}")
+        return bytes_written
 
     # ------------------------------------------------------------------
     # Permissions (for security trimming)
@@ -457,6 +670,35 @@ class SharePointClient:
         return list(set(identity_ids))
 
     # ------------------------------------------------------------------
+    # Metadata filter helpers
+    # ------------------------------------------------------------------
+
+    def _get_list_item_fields(
+        self, drive_id: str, item_id: str, columns: str
+    ) -> dict:
+        """Fetch SharePoint list-item field values for a single drive item.
+
+        Used for the delta path where ``$expand=listItem`` is not supported
+        by the Graph delta API and we need a separate per-item request.
+
+        Args:
+            drive_id: ID of the drive that contains the item.
+            item_id:  Graph item ID.
+            columns:  Comma-separated internal column names for ``$select``.
+
+        Returns:
+            Dict of ``{column_name: value}`` or empty dict on error.
+        """
+        url = f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/listItem/fields"
+        if columns:
+            url = f"{url}?$select={columns}"
+        try:
+            return self._get(url)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not fetch list item fields for item {item_id}: {e}")
+            return {}
+
+    # ------------------------------------------------------------------
     # Build SharePointFile objects
     # ------------------------------------------------------------------
 
@@ -485,7 +727,16 @@ class SharePointClient:
                 )
             else:
                 try:
-                    content = self.download_file(drive_id, item_id)
+                    if self._sp.published_versions_only:
+                        content = self.download_published_version(drive_id, item_id)
+                        if content is None:
+                            logger.warning(
+                                f"{item.get('name', '')}: no published major version found; "
+                                "falling back to current content"
+                            )
+                            content = self.download_file(drive_id, item_id)
+                    else:
+                        content = self.download_file(drive_id, item_id)
                     logger.debug(f"Downloaded: {item.get('name', '')} ({len(content)} bytes)")
                 except Exception as e:
                     logger.error(f"Failed to download {item.get('name', '')}: {e}")

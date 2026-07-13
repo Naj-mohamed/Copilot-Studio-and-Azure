@@ -31,7 +31,7 @@
       "filterable": false,
       "sortable": false,
       "facetable": false,
-      "dimensions": 1024,
+      "dimensions": __EMBEDDING_DIMENSIONS__,
       "vectorSearchProfile": "sp-vector-profile"
     }
   ],
@@ -43,16 +43,17 @@
       {
         "name": "sp-vector-profile",
         "algorithm": "sp-hnsw",
-        "vectorizer": "sp-aivision-vectorizer"
+        "vectorizer": "sp-oai-vectorizer"
       }
     ],
     "vectorizers": [
       {
-        "name": "sp-aivision-vectorizer",
-        "kind": "aiServicesVision",
-        "aiServicesVisionParameters": {
-          "resourceUri": "__MULTIMODAL_ENDPOINT__",
-          "modelVersion": "__MULTIMODAL_MODEL_VERSION__"
+        "name": "sp-oai-vectorizer",
+        "kind": "azureOpenAI",
+        "azureOpenAIParameters": {
+          "resourceUri": "__AZURE_OPENAI_ENDPOINT__",
+          "deploymentId": "__AZURE_OPENAI_EMBEDDING_DEPLOYMENT__",
+          "modelName": "__AZURE_OPENAI_EMBEDDING_MODEL__"
         }
       }
     ]

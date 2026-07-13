@@ -5,10 +5,18 @@ import pytest
 from unittest.mock import patch
 
 # Import at module level so load_dotenv() runs BEFORE any env patching
-from config import FunctionProcessingMode, ProcessingMode, load_config
+from config import FunctionProcessingMode, MetadataFilterConfig, ProcessingMode, load_config
 
-# Minimal required env vars for a valid config
+# Minimal required env vars for a valid config — using Azure OpenAI (recommended path)
 _REQUIRED_ENV = {
+    "TENANT_ID": "test-tenant-id",
+    "SHAREPOINT_SITE_URL": "https://contoso.sharepoint.com/sites/TestSite",
+    "SEARCH_ENDPOINT": "https://my-search.search.windows.net",
+    "AZURE_OPENAI_ENDPOINT": "https://my-foundry.cognitiveservices.azure.com",
+}
+
+# Florence-only env vars (legacy regions with Florence but no OpenAI quota)
+_FLORENCE_ENV = {
     "TENANT_ID": "test-tenant-id",
     "SHAREPOINT_SITE_URL": "https://contoso.sharepoint.com/sites/TestSite",
     "SEARCH_ENDPOINT": "https://my-search.search.windows.net",
@@ -38,9 +46,10 @@ class TestLoadConfigRequired:
                 load_config()
 
     def test_missing_multimodal_endpoint(self):
-        env = {k: v for k, v in _REQUIRED_ENV.items() if k != "MULTIMODAL_ENDPOINT"}
+        """Neither AZURE_OPENAI_ENDPOINT nor MULTIMODAL_ENDPOINT set → error."""
+        env = {k: v for k, v in _REQUIRED_ENV.items() if k != "AZURE_OPENAI_ENDPOINT"}
         with patch.dict(os.environ, env, clear=True):
-            with pytest.raises(EnvironmentError, match="MULTIMODAL_ENDPOINT"):
+            with pytest.raises(EnvironmentError, match="AZURE_OPENAI_ENDPOINT"):
                 load_config()
 
 
@@ -61,9 +70,18 @@ class TestLoadConfigDefaults:
 
         assert cfg.search.index_name == "sharepoint-index"
 
-        assert cfg.multimodal.endpoint == "https://my-foundry.cognitiveservices.azure.com"
+        assert cfg.multimodal.endpoint == ""
         assert cfg.multimodal.model_version == "2023-04-15"
         assert cfg.multimodal.images_container == "images"
+
+        assert cfg.azure_openai.endpoint == "https://my-foundry.cognitiveservices.azure.com"
+        assert cfg.azure_openai.embedding_model == "text-embedding-3-large"
+        assert cfg.azure_openai.embedding_dimensions == 3072
+        assert cfg.azure_openai.vision_model == "gpt-4o"
+        assert cfg.azure_openai.enabled is True
+
+        assert cfg.metadata_filter.enabled is False
+        assert cfg.metadata_filter.filters == ()
 
         assert cfg.indexer.chunk_size == 2000
         assert cfg.indexer.chunk_overlap == 200
@@ -73,18 +91,32 @@ class TestLoadConfigDefaults:
         assert cfg.indexer.start_date is None
         assert cfg.indexer.function_processing_mode == FunctionProcessingMode.QUEUE
         assert cfg.indexer.extract_images is True
+        assert cfg.indexer.dispatcher_skip_fresh is True
 
     def test_default_extensions_count(self):
         with patch.dict(os.environ, _REQUIRED_ENV, clear=True):
             cfg = load_config()
 
-        # Default extensions now include standalone image formats (29 total).
-        assert len(cfg.indexer.indexed_extensions) == 29
+        # Default extensions include documents, images, and video formats (38 total).
+        assert len(cfg.indexer.indexed_extensions) == 38
         assert ".pdf" in cfg.indexer.indexed_extensions
         assert ".zip" in cfg.indexer.indexed_extensions
         assert ".gz" in cfg.indexer.indexed_extensions
         assert ".png" in cfg.indexer.indexed_extensions
         assert ".jpg" in cfg.indexer.indexed_extensions
+        assert ".vsdx" in cfg.indexer.indexed_extensions
+        assert ".mp4" in cfg.indexer.indexed_extensions
+        assert ".mov" in cfg.indexer.indexed_extensions
+
+class TestLoadConfigFlorencePath:
+    """Legacy Florence-only config (no Azure OpenAI endpoint)."""
+
+    def test_florence_path_loads(self):
+        with patch.dict(os.environ, _FLORENCE_ENV, clear=True):
+            cfg = load_config()
+        assert cfg.multimodal.endpoint == "https://my-foundry.cognitiveservices.azure.com"
+        assert cfg.multimodal.enabled is True
+        assert cfg.azure_openai.enabled is False
 
 
 class TestLoadConfigCustomValues:
@@ -106,6 +138,7 @@ class TestLoadConfigCustomValues:
             "PROCESSING_MODE": "full",
             "FUNCTION_PROCESSING_MODE": "inline",
             "EXTRACT_IMAGES": "false",
+            "DISPATCHER_SKIP_FRESH": "false",
             "INDEXED_EXTENSIONS": ".pdf,.docx,.txt",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -129,6 +162,7 @@ class TestLoadConfigCustomValues:
         assert cfg.indexer.processing_mode == ProcessingMode.FULL
         assert cfg.indexer.function_processing_mode == FunctionProcessingMode.INLINE
         assert cfg.indexer.extract_images is False
+        assert cfg.indexer.dispatcher_skip_fresh is False
         assert cfg.indexer.indexed_extensions == [".pdf", ".docx", ".txt"]
 
 
@@ -166,3 +200,78 @@ class TestEntraConfigManagedIdentity:
         with patch.dict(os.environ, env, clear=True):
             cfg = load_config()
         assert cfg.entra.use_managed_identity is False
+
+
+class TestMetadataFilterConfig:
+    """Tests for METADATA_FILTERS parsing and MetadataFilterConfig behaviour."""
+
+    def test_empty_env_var_gives_disabled_filter(self):
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": ""}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.enabled is False
+        assert cfg.metadata_filter.filters == ()
+
+    def test_single_filter_parses(self):
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": "DocumentStatusTX=Approved"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.enabled is True
+        assert cfg.metadata_filter.filters == (("DocumentStatusTX", "=", "Approved"),)
+
+    def test_multiple_filters_parse(self):
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": "DocumentStatusTX=Approved,DocumentTypeTX=Guideline"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.enabled is True
+        assert cfg.metadata_filter.filters == (
+            ("DocumentStatusTX", "=", "Approved"),
+            ("DocumentTypeTX", "=", "Guideline"),
+        )
+
+    def test_whitespace_is_stripped(self):
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": " DocumentStatusTX = Approved , DocumentTypeTX = Guideline "}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.filters == (
+            ("DocumentStatusTX", "=", "Approved"),
+            ("DocumentTypeTX", "=", "Guideline"),
+        )
+
+    def test_malformed_token_without_operator_is_ignored(self):
+        """A token with no operator is silently skipped."""
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": "NoOperatorHere,DocumentStatusTX=Approved"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.filters == (("DocumentStatusTX", "=", "Approved"),)
+
+    def test_value_with_equals_sign(self):
+        """Values can contain '=' characters (only split on first '=')."""
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": "Column=A=B"}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.filters == (("Column", "=", "A=B"),)
+
+    def test_not_equal_operator_parses(self):
+        """``<>`` and ``!=`` are parsed as not-equal conditions."""
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": 'FileName<>"Main Document.docx"'}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.filters == (("FileName", "<>", "Main Document.docx"),)
+
+    def test_mixed_equal_and_not_equal_with_quotes(self):
+        env = {**_REQUIRED_ENV, "METADATA_FILTERS": 'DDStatus=Approved,FileName<>"Main Document.docx"'}
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.metadata_filter.filters == (
+            ("DDStatus", "=", "Approved"),
+            ("FileName", "<>", "Main Document.docx"),
+        )
+
+    def test_metadata_filter_config_enabled_false_when_empty(self):
+        mf = MetadataFilterConfig()
+        assert mf.enabled is False
+
+    def test_metadata_filter_config_enabled_true_when_filters_set(self):
+        mf = MetadataFilterConfig(filters=(("Col", "Val"),))
+        assert mf.enabled is True

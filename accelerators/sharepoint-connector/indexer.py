@@ -8,14 +8,15 @@ Per-file pipeline:
      - PDF/DOCX/PPTX/XLSX (DocIntel enabled) → Layout → text + figure blocks.
      - Plain-text formats → single TEXT block.
   3. chunk_blocks() → one chunk per image, plus text chunks with overlap.
-  4. Azure AI Vision multimodal embeds every chunk:
-     - Text chunks  → vectorizeText  → content_embedding (1024d).
-     - Image chunks → vectorizeImage → content_embedding (1024d, same space).
-     - Image crops uploaded to blob for citation rendering (content_path).
+  4. Embedding client embeds every chunk:
+     - Azure OpenAI (preferred, all regions):
+         Text chunks  → text-embedding-3-large → content_embedding (3072d).
+         Image chunks → GPT-4o caption → embed caption text (3072d).
+     - Azure AI Vision Florence (fallback, Florence-enabled regions only):
+         Text chunks  → vectorizeText  → content_embedding (1024d).
+         Image chunks → vectorizeImage → content_embedding (1024d, same space).
+     Image crops uploaded to blob for citation rendering (content_path).
   5. Single upload to the unified-vector index.
-
-No Azure OpenAI embedding, no gpt-4o vision — only Azure AI Vision multimodal
-and (optionally) Document Intelligence for layout-aware extraction.
 """
 
 from __future__ import annotations
@@ -32,10 +33,12 @@ from typing import Any
 
 from chunker import TextChunk, chunk_blocks
 from config import AppConfig, ProcessingMode, load_config
+from speech_transcription_client import SpeechTranscriptionClient
 from doc_intelligence_client import DocIntelligenceClient
 from document_processor import extract_blocks
 from image_storage import ImageStore
 from multimodal_embeddings_client import MultimodalEmbeddingsClient
+from openai_embeddings_client import OpenAIEmbeddingsClient
 from search_client import SearchPushClient
 from sharepoint_client import SharePointClient, SharePointFile
 from state_store import get_store
@@ -79,6 +82,27 @@ class IndexerStats:
         )
 
 
+def _make_embedding_client(config: AppConfig):
+    """Return the active embedding client.
+
+    Azure OpenAI is preferred when AZURE_OPENAI_ENDPOINT is set (works in all
+    regions including Canada Central). Falls back to the Florence multimodal
+    client when only MULTIMODAL_ENDPOINT is configured.
+    """
+    if config.azure_openai.enabled:
+        return OpenAIEmbeddingsClient(
+            endpoint=config.azure_openai.endpoint,
+            embedding_model=config.azure_openai.embedding_model,
+            vision_model=config.azure_openai.vision_model,
+            api_version=config.azure_openai.api_version,
+            max_concurrency=config.azure_openai.max_concurrency,
+        )
+    return MultimodalEmbeddingsClient(
+        endpoint=config.multimodal.endpoint,
+        model_version=config.multimodal.model_version,
+    )
+
+
 def _make_parent_id(drive_id: str, item_id: str) -> str:
     raw = f"{drive_id}:{item_id}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
@@ -112,13 +136,14 @@ def _process_single_file(
     sp_file: SharePointFile,
     config: AppConfig,
     search: SearchPushClient,
-    multimodal: MultimodalEmbeddingsClient,
+    embedding,   # OpenAIEmbeddingsClient | MultimodalEmbeddingsClient (duck typing)
     stats: IndexerStats,
     content_path: str | None = None,
     doc_intel: DocIntelligenceClient | None = None,
+    video_transcriber: SpeechTranscriptionClient | None = None,
     image_store: ImageStore | None = None,
 ) -> None:
-    """Extract → chunk → embed → push. Unified 1024d vector for every chunk."""
+    """Extract → chunk → embed → push."""
     parent_id = _make_parent_id(sp_file.drive_id, sp_file.id)
 
     if _is_fresh(search, parent_id, sp_file.last_modified):
@@ -141,7 +166,12 @@ def _process_single_file(
         cleanup_tmp = effective_path
 
     try:
-        blocks = extract_blocks(effective_path, sp_file.name, doc_intel=doc_intel)
+        blocks = extract_blocks(
+            effective_path,
+            sp_file.name,
+            doc_intel=doc_intel,
+            video_transcriber=video_transcriber,
+        )
         if not blocks:
             logger.warning(f"No blocks extracted from {sp_file.name}, skipping")
             stats.record_error(f"No blocks: {sp_file.name}")
@@ -158,14 +188,12 @@ def _process_single_file(
             stats.record_error(f"No chunks: {sp_file.name}")
             return
 
-        # --- Embed every chunk through the same multimodal endpoint --------
+        # --- Embed every chunk through the active embedding client ----------
         # Chunks are vectorised in parallel up to `vectorise_concurrency`.
-        # The MultimodalEmbeddingsClient holds its own semaphore so Vision
-        # rate limits are honoured even if callers are over-eager.
         def _vectorise_one(chunk: TextChunk) -> dict[str, Any] | None:
             if chunk.is_image:
-                return _build_image_doc(chunk, parent_id, sp_file, multimodal, image_store)
-            return _build_text_doc(chunk, parent_id, sp_file, multimodal)
+                return _build_image_doc(chunk, parent_id, sp_file, embedding, image_store)
+            return _build_text_doc(chunk, parent_id, sp_file, embedding)
 
         workers = max(1, min(config.indexer.vectorise_concurrency, len(chunks)))
         if workers == 1:
@@ -230,11 +258,11 @@ def _build_text_doc(
     chunk: TextChunk,
     parent_id: str,
     sp_file: SharePointFile,
-    multimodal: MultimodalEmbeddingsClient,
+    embedding,   # duck-typed embedding client
 ) -> dict[str, Any] | None:
-    vector = multimodal.vectorize_text(chunk.text)
+    vector = embedding.vectorize_text(chunk.text)
     if vector is None:
-        logger.warning(f"Skipping text chunk {chunk.chunk_id}: vectorizeText returned None")
+        logger.warning(f"Skipping text chunk {chunk.chunk_id}: vectorize_text returned None")
         return None
     doc = _common_fields(chunk, parent_id, sp_file)
     doc.update({
@@ -249,15 +277,19 @@ def _build_image_doc(
     chunk: TextChunk,
     parent_id: str,
     sp_file: SharePointFile,
-    multimodal: MultimodalEmbeddingsClient,
+    embedding,   # duck-typed embedding client
     image_store: ImageStore | None,
 ) -> dict[str, Any] | None:
     if not chunk.image_bytes:
         return None
 
-    vector = multimodal.vectorize_image(chunk.image_bytes, mime=chunk.image_mime)
+    vector = embedding.vectorize_image(
+        chunk.image_bytes,
+        mime=chunk.image_mime,
+        neighbour_text=chunk.neighbour_text,
+    )
     if vector is None:
-        logger.warning(f"Skipping image chunk {chunk.chunk_id}: vectorizeImage returned None")
+        logger.warning(f"Skipping image chunk {chunk.chunk_id}: vectorize_image returned None")
         return None
 
     content_path = ""
@@ -391,11 +423,12 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
 
     sp_client = SharePointClient(config.entra, config.sharepoint)
     search = SearchPushClient(config.search, config.multimodal)
-    multimodal = MultimodalEmbeddingsClient(
-        endpoint=config.multimodal.endpoint,
-        model_version=config.multimodal.model_version,
-    )
+    embedding = _make_embedding_client(config)
     doc_intel = DocIntelligenceClient(config.docintel) if config.docintel.enabled else None
+    video_transcriber = (
+        SpeechTranscriptionClient(config.speech_transcription)
+        if config.speech_transcription.enabled else None
+    )
     image_store: ImageStore | None = None
     try:
         image_store = ImageStore(container=config.multimodal.images_container)
@@ -428,6 +461,7 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
             raw_files, deleted_item_ids, delta_tokens_updated = sp_client.list_changes_all_drives(
                 delta_tokens=existing_tokens,
                 extensions=config.indexer.indexed_extensions,
+                metadata_filter=config.metadata_filter,
             )
             logger.info(
                 f"Delta query: {len(raw_files)} modified, {len(deleted_item_ids)} deleted"
@@ -441,6 +475,7 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
                 modified_since=modified_since,
                 extensions=config.indexer.indexed_extensions,
                 root_paths=config.indexer.root_paths,
+                metadata_filter=config.metadata_filter,
             )
 
         stats.files_discovered = len(raw_files)
@@ -473,9 +508,10 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
                     sp_file,
                     config,
                     search,
-                    multimodal,
+                    embedding,
                     stats,
                     doc_intel=doc_intel,
+                    video_transcriber=video_transcriber,
                     image_store=image_store,
                 )
             except Exception as e:  # noqa: BLE001
@@ -487,7 +523,6 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
             futures = {executor.submit(_process_item, item): item for item in raw_files}
             for future in as_completed(futures):
                 future.result()
-
         # ----- Reconciliation -----------------------------------------------
         # FULL mode: always run a full scan against SharePoint.
         # SINCE_LAST_RUN: delta query already caught deletions, but every Nth
@@ -518,6 +553,7 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
                     modified_since=None,
                     extensions=config.indexer.indexed_extensions,
                     root_paths=config.indexer.root_paths,
+                    metadata_filter=config.metadata_filter,
                 )
                 full_parent_ids = {
                     _make_parent_id(item.get("_drive_id", ""), item["id"])
@@ -546,9 +582,11 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
     finally:
         sp_client.close()
         search.close()
-        multimodal.close()
+        embedding.close()
         if doc_intel is not None:
             doc_intel.close()
+        if video_transcriber is not None:
+            video_transcriber.close()
         if image_store is not None:
             image_store.close()
 
@@ -560,38 +598,46 @@ def run_indexer(config: AppConfig | None = None) -> IndexerStats:
 _client_pool_lock = threading.Lock()
 _sp_client: SharePointClient | None = None
 _search_client: SearchPushClient | None = None
-_multimodal_client: MultimodalEmbeddingsClient | None = None
+_embedding_client = None   # OpenAIEmbeddingsClient | MultimodalEmbeddingsClient
 _doc_intel_client: DocIntelligenceClient | None = None
+_video_transcriber_client: SpeechTranscriptionClient | None = None
 _image_store: ImageStore | None = None
 
 
 def _get_worker_clients(cfg: AppConfig):
     """Build or return pooled per-worker clients."""
-    global _sp_client, _search_client, _multimodal_client, _doc_intel_client, _image_store
+    global _sp_client, _search_client, _embedding_client, _doc_intel_client
+    global _video_transcriber_client, _image_store
     with _client_pool_lock:
         if _sp_client is None:
             _sp_client = SharePointClient(cfg.entra, cfg.sharepoint)
         if _search_client is None:
             _search_client = SearchPushClient(cfg.search, cfg.multimodal)
-        if _multimodal_client is None:
-            _multimodal_client = MultimodalEmbeddingsClient(
-                endpoint=cfg.multimodal.endpoint,
-                model_version=cfg.multimodal.model_version,
-            )
+        if _embedding_client is None:
+            _embedding_client = _make_embedding_client(cfg)
         if _doc_intel_client is None and cfg.docintel.enabled:
             _doc_intel_client = DocIntelligenceClient(cfg.docintel)
+        if _video_transcriber_client is None and cfg.speech_transcription.enabled:
+            _video_transcriber_client = SpeechTranscriptionClient(cfg.speech_transcription)
         if _image_store is None:
             try:
                 _image_store = ImageStore(container=cfg.multimodal.images_container)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"ImageStore init failed: {e}")
-    return (_sp_client, _search_client, _multimodal_client, _doc_intel_client, _image_store)
+    return (
+        _sp_client,
+        _search_client,
+        _embedding_client,
+        _doc_intel_client,
+        _video_transcriber_client,
+        _image_store,
+    )
 
 
 def process_single_message(payload: dict[str, Any]) -> None:
     """Process one queue message: download + index a single file."""
     cfg = load_config()
-    sp, search, multimodal, doc_intel, image_store = _get_worker_clients(cfg)
+    sp, search, embedding, doc_intel, video_transcriber, image_store = _get_worker_clients(cfg)
 
     drive_id = payload["drive_id"]
     item_id = payload["item_id"]
@@ -604,6 +650,11 @@ def process_single_message(payload: dict[str, Any]) -> None:
         if last_mod_str else datetime.now(timezone.utc)
     )
 
+    # Freshness/skip logic now lives in the dispatcher (see _dispatch_files with
+    # DISPATCHER_SKIP_FRESH): already-indexed, unchanged files are filtered out
+    # BEFORE they are enqueued, so the worker no longer needs a pre-download
+    # skip. The shared _process_single_file pipeline still performs a final
+    # freshness check as an idempotency safety net (and for inline mode).
     size = int(payload.get("size", 0))
     max_bytes = cfg.indexer.max_file_size_mb * 1024 * 1024
     if size > max_bytes:
@@ -618,7 +669,15 @@ def process_single_message(payload: dict[str, Any]) -> None:
     fd, tmp_path = tempfile.mkstemp(prefix="sp-", suffix=f"-{_safe_name(name)}", dir=tmpdir)
     os.close(fd)
     try:
-        bytes_written = sp.download_file_to_path(drive_id, item_id, tmp_path)
+        if cfg.sharepoint.published_versions_only:
+            bytes_written = sp.download_published_version_to_path(drive_id, item_id, tmp_path)
+            if bytes_written is None:
+                logger.warning(
+                    f"{name}: no published major version found; falling back to current content"
+                )
+                bytes_written = sp.download_file_to_path(drive_id, item_id, tmp_path)
+        else:
+            bytes_written = sp.download_file_to_path(drive_id, item_id, tmp_path)
         logger.info(f"Streamed {bytes_written} bytes for {name}")
 
         try:
@@ -647,10 +706,11 @@ def process_single_message(payload: dict[str, Any]) -> None:
             sp_file,
             cfg,
             search,
-            multimodal,
+            embedding,
             stats,
             content_path=tmp_path,
             doc_intel=doc_intel,
+            video_transcriber=video_transcriber,
             image_store=image_store,
         )
         logger.info(stats.summary())

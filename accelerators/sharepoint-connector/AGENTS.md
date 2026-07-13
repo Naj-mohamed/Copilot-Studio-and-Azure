@@ -10,7 +10,10 @@ A **production-oriented push connector** (serverless Azure Function, Python) tha
 It overcomes the built-in SharePoint knowledge source / AI Search SharePoint connector (preview) limitations: file-size caps (>200 MB), no private endpoint support, no Conditional Access compatibility, no SLA, no per-user trimming, and limited extraction control.
 
 Core capabilities:
-- **Unified multimodal index** — text + image content in the same vector space (Azure AI Vision multimodal embeddings; optional Document Intelligence Layout).
+- **Unified multimodal index** — text + image content in the same vector space (**Azure OpenAI `text-embedding-3-large` (3072d)** embeddings + **`gpt-5.1`** image captioning; **Azure AI Vision** Florence multimodal 1024d as a regional fallback; optional Document Intelligence Layout).
+- **Visio diagram search** — `.vsdx` (and `.vsd` via LibreOffice) shape/stencil labels extracted and indexed.
+- **Video transcription** — video files transcribed via **Azure Speech Fast Transcription** (same Foundry AIServices account) into timestamped text blocks.
+- **Metadata column filter** — `METADATA_FILTERS` (e.g. `DocumentStatusTX=Approved`) dispatches only files whose SharePoint column values match, before any download/embedding.
 - **Scoped monitoring** — watch a whole site or just a folder/library.
 - **Near-real-time deletion propagation** via Microsoft Graph `/delta`.
 - **Least-privilege Graph access** (`Sites.Selected`), nightly backups.
@@ -25,12 +28,17 @@ Core capabilities:
 | `sharepoint_client.py` | Microsoft Graph `/delta` + file download |
 | `document_processor.py`, `chunker.py`, `blocks.py` | Extraction + chunking pipeline |
 | `doc_intelligence_client.py` | Document Intelligence Layout extraction |
-| `multimodal_embeddings_client.py` | Azure AI Vision multimodal embeddings |
+| `visio_processor.py` | Visio `.vsdx`/`.vsd` shape + stencil label extraction |
+| `openai_embeddings_client.py` | Azure OpenAI `text-embedding-3-large` embeddings + `gpt-5.1` captioning |
+| `multimodal_embeddings_client.py` | Azure AI Vision Florence multimodal embeddings (regional fallback) |
+| `content_understanding_client.py` | Azure AI Content Understanding client (optional extraction path) |
+| `speech_transcription_client.py` | Azure Speech Fast Transcription for video files |
 | `search_client.py`, `search_security.py` | AI Search index upsert + security trimming |
 | `image_storage.py` | Image crop upload to blob for citation thumbnails |
 | `state_store.py`, `index_backup.py` | Delta watermark/run state (Table); nightly backups |
+| `enqueue_files.py` | Manually (re)queue specific files onto the indexer queue |
 | `config.py`, `host.json`, `pyproject.toml`, `requirements.txt` | Config + Functions runtime + deps |
-| `infra/` | Bicep + `deploy.ps1`; provisions everything + RBAC |
+| `infra/` | Bicep + `deploy.ps1`; provisions everything + RBAC; operational report/health scripts |
 | `deploy/` | `azuredeploy.json` (one-click Deploy to Azure) |
 | `copilot-studio-topics/` | Copilot Studio topic YAML for the querying agent |
 | `tests/` | Test suite |
@@ -79,7 +87,6 @@ use_case:
     - "Optional per-user security trimming (ACL enforcement at query time)"
   domain: "enterprise knowledge / M365 content grounding"
   extensibility: "Add file formats, swap embedding model, change index schema, adjust concurrency, switch processing modes"
-
 agentic_patterns:
   orchestration: "Copilot Studio built-in generative orchestration over AI Search knowledge source"
   tool_function_calling: "AI Search knowledge source connector; optional HTTP /api/search action for trimming"
@@ -94,7 +101,7 @@ data_scenario:
   transformation_pipelines: ["Document Intelligence Layout", "chunking", "multimodal embedding", "image crop -> blob"]
 
 ai_stack:
-  llm_provider: "Copilot Studio (answer generation); Azure AI Vision multimodal for embeddings"
+  llm_provider: "Copilot Studio (answer generation); Azure OpenAI text-embedding-3-large embeddings + gpt-5.1 image captioning; Azure AI Vision Florence multimodal as regional fallback; Azure Speech Fast Transcription for video"
   search_integration: "Azure AI Search (Basic)"
   agent_framework: "Copilot Studio"
   observability: "Log Analytics + Application Insights"
@@ -103,7 +110,7 @@ ai_stack:
 hosting:
   compute_platform: "Azure Functions (Flex Consumption)"
   scaling_model: "serverless / queue-based scale-out (Storage Queue workers)"
-  regional_availability: "region must support Azure AI Vision multimodal 4.0"
+  regional_availability: "region must support Azure OpenAI text-embedding-3-large + gpt-5.1 (Azure AI Vision multimodal 4.0 for the fallback path)"
 
 api_integration:
   internal_apis: "Azure AI Search REST, Blob/Queue/Table"
@@ -121,5 +128,5 @@ infrastructure:
   cicd: "GitHub Releases-based code package pull via ARM deploymentScripts"
   monitoring: "Application Insights + Log Analytics"
 
-stack_summary: ["Python", "Azure Functions (Flex Consumption)", "Azure AI Search", "Azure AI Vision multimodal", "Document Intelligence Layout", "Storage (Queue/Table/Blob)", "Key Vault", "Microsoft Graph", "Copilot Studio"]
+stack_summary: ["Python", "Azure Functions (Flex Consumption)", "Azure AI Search", "Azure OpenAI (text-embedding-3-large + gpt-5.1)", "Azure AI Vision multimodal (fallback)", "Azure Speech Fast Transcription", "Document Intelligence Layout", "Storage (Queue/Table/Blob)", "Key Vault", "Microsoft Graph", "Copilot Studio"]
 ```

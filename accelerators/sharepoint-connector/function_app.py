@@ -143,7 +143,7 @@ def _dispatch_files() -> None:
     from datetime import datetime, timezone
 
     from config import ProcessingMode, load_config
-    from indexer import _resolve_modified_since  # internal helper, reused
+    from indexer import _is_fresh, _make_parent_id, _resolve_modified_since  # internal helpers, reused
     from sharepoint_client import SharePointClient
     from state_store import get_store
 
@@ -158,9 +158,43 @@ def _dispatch_files() -> None:
         items = sp.list_all_files(
             modified_since=modified_since,
             extensions=cfg.indexer.indexed_extensions,
+            root_paths=cfg.indexer.root_paths,
+            metadata_filter=cfg.metadata_filter,
         )
     finally:
         sp.close()
+
+    # Freshness skip (relocated from the worker): drop already-indexed, unchanged
+    # files BEFORE they are enqueued, so a FULL / since-date pass only queues the
+    # new/changed backlog instead of flooding the queue with no-op messages.
+    if items and cfg.indexer.dispatcher_skip_fresh:
+        from search_client import SearchPushClient
+
+        search = SearchPushClient(cfg.search, cfg.multimodal)
+        kept: list[dict] = []
+        fresh_skipped = 0
+        for item in items:
+            try:
+                last_mod_str = item.get("lastModifiedDateTime", "")
+                last_modified = (
+                    datetime.fromisoformat(last_mod_str.replace("Z", "+00:00"))
+                    if last_mod_str else run_started_at
+                )
+                parent_id = _make_parent_id(item.get("_drive_id", ""), item["id"])
+                if _is_fresh(search, parent_id, last_modified):
+                    fresh_skipped += 1
+                    continue
+            except Exception as e:  # noqa: BLE001
+                logging.warning(
+                    f"Freshness check failed for {item.get('name', item.get('id'))}; "
+                    f"enqueuing anyway: {e}"
+                )
+            kept.append(item)
+        logging.info(
+            f"Dispatcher skip-fresh: {fresh_skipped} unchanged skipped, "
+            f"{len(kept)} to enqueue"
+        )
+        items = kept
 
     if not items:
         logging.info("No files to enqueue")

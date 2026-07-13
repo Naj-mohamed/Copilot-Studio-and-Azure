@@ -75,6 +75,9 @@ def extract_text(
         ".pptx": _extract_pptx,
         ".pptm": _extract_pptx,
         ".msg": _extract_msg,
+        # Visio diagrams
+        ".vsdx": _extract_visio,
+        ".vsd": _extract_visio,
         # Open Document
         ".odt": _extract_odt,
         ".ods": _extract_ods,
@@ -108,7 +111,7 @@ def extract_text(
         return ""
 
     # Extractors that open a file path directly (avoids loading whole file into RAM).
-    _path_aware = {".pdf", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm"}
+    _path_aware = {".pdf", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm", ".vsdx", ".vsd"}
 
     try:
         kwargs: dict = {}
@@ -213,6 +216,38 @@ def _extract_msg(content: bytes, filename: str = "") -> str:
         parts.append(msg.body)
     msg.close()
     return "\n".join(parts)
+
+
+# ------------------------------------------------------------------
+# Visio diagrams
+# ------------------------------------------------------------------
+
+def _extract_visio(content: bytes | None, filename: str = "", *, path: str | None = None) -> str:
+    """Extract on-canvas shape text from Visio (.vsdx / .vsd).
+
+    Prefers a file path (the .vsdx reader opens the ZIP directly). When only
+    bytes are available — e.g. a Visio file nested inside an archive — the
+    content is staged to a temp file so the path-based extractor can run.
+    """
+    from visio_processor import extract_visio_text
+
+    if path is not None:
+        return extract_visio_text(path, filename or path)
+
+    import os
+    import tempfile
+
+    suffix = PurePosixPath(filename).suffix.lower() or ".vsdx"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="visio-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content or b"")
+        return extract_visio_text(tmp_path, filename or tmp_path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 # ------------------------------------------------------------------
@@ -498,24 +533,43 @@ _IMAGE_MIME = {
     ".bmp": "image/bmp",
 }
 
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
+
 
 def extract_blocks(
     path: str,
     filename: str,
     *,
-    doc_intel=None,                 # DocIntelligenceClient | None
+    doc_intel=None,              # DocIntelligenceClient | None
+    video_transcriber=None,      # SpeechTranscriptionClient | None
 ) -> list[Block]:
     """Return an ordered list of Blocks extracted from the file at `path`.
 
     Routing:
+      - Video files (.mp4, .mov, ...) with a video_transcriber enabled →
+        Azure Speech Fast Transcription → TEXT blocks (timestamped transcript).
       - Standalone image files (.png, .jpg, ...) → one IMAGE block with raw bytes.
-        The indexer will embed the bytes directly via Azure AI Vision `vectorizeImage`.
+        The indexer embeds the bytes via Azure OpenAI gpt-4o + text-embedding-3-large.
       - PDF / DOCX / PPTX / XLSX with DocIntel enabled → Document Intelligence
         Layout → mixed TEXT + IMAGE blocks with reading order and bounding polygons.
       - Everything else, or when DocIntel is disabled → fall back to the legacy
         extractors (one TEXT block per file).
     """
     ext = PurePosixPath(filename).suffix.lower()
+
+    # -------- Route 0: video file — transcribe with Azure Speech. --------
+    if ext in _VIDEO_EXTS:
+        if video_transcriber is not None and getattr(video_transcriber, "enabled", False):
+            blocks = video_transcriber.extract_blocks(path, ext)
+            if blocks:
+                return blocks
+            logger.warning(f"Speech transcription produced no blocks for {filename}")
+        else:
+            logger.warning(
+                f"Skipping video {filename}: video transcriber is not configured "
+                f"(AZURE_OPENAI_ENDPOINT must be set and 'av>=13.0.0' installed)"
+            )
+        return []
 
     # -------- Route 1: standalone image file — emit as a single IMAGE block. --------
     if ext in _IMAGE_EXTS:

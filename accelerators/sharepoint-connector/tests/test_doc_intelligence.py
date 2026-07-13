@@ -158,3 +158,99 @@ class TestExtractionMapping:
             tf.write(b"fake")
             path = tf.name
         assert c.extract_blocks(path, ".pdf") == []
+
+
+def _fake_pdf_doc(page_count: int):
+    doc = MagicMock()
+    doc.page_count = page_count
+    doc.__enter__.return_value = doc
+    doc.__exit__.return_value = False
+    return doc
+
+
+class TestPageSegmentation:
+    def _client(self, batch: int, concurrency: int = 1) -> DocIntelligenceClient:
+        cfg = DocIntelConfig(
+            endpoint="https://docintel.example.com",
+            page_batch_size=batch,
+            page_batch_concurrency=concurrency,
+        )
+        c = DocIntelligenceClient.__new__(DocIntelligenceClient)
+        c._cfg = cfg
+        c._credential = MagicMock()
+        c._client = None
+        return c
+
+    def test_large_pdf_segmented_into_page_batches(self):
+        c = self._client(batch=2, concurrency=1)
+        calls: list[str | None] = []
+
+        def _begin(**kwargs):
+            calls.append(kwargs.get("pages"))
+            poller = MagicMock()
+            poller.result.return_value = SimpleNamespace(
+                paragraphs=[_paragraph(f"range {kwargs.get('pages')}")],
+                tables=None,
+                figures=None,
+            )
+            return poller
+
+        inner = MagicMock()
+        inner.begin_analyze_document.side_effect = _begin
+        c._client = inner
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
+            tf.write(b"%PDF-1.4 fake")
+            path = tf.name
+
+        with patch("fitz.open", return_value=_fake_pdf_doc(5)):
+            blocks = c.extract_blocks(path, ".pdf")
+
+        # 5 pages / batch 2 -> ranges 1-2, 3-4, 5-5
+        assert set(calls) == {"1-2", "3-4", "5-5"}
+        assert len(blocks) == 3
+        # order re-numbered globally across merged batches
+        assert [b.order for b in blocks] == [0, 1, 2]
+
+    def test_small_pdf_uses_single_call_without_pages_kwarg(self):
+        c = self._client(batch=10)
+        poller = MagicMock()
+        poller.result.return_value = SimpleNamespace(
+            paragraphs=[_paragraph("only")], tables=None, figures=None
+        )
+        inner = MagicMock()
+        inner.begin_analyze_document.return_value = poller
+        c._client = inner
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
+            tf.write(b"%PDF fake")
+            path = tf.name
+
+        with patch("fitz.open", return_value=_fake_pdf_doc(3)):
+            blocks = c.extract_blocks(path, ".pdf")
+
+        assert len(blocks) == 1
+        _, kwargs = inner.begin_analyze_document.call_args
+        assert "pages" not in kwargs
+
+    def test_segmentation_disabled_when_batch_zero(self):
+        c = self._client(batch=0)
+        poller = MagicMock()
+        poller.result.return_value = SimpleNamespace(
+            paragraphs=[_paragraph("whole")], tables=None, figures=None
+        )
+        inner = MagicMock()
+        inner.begin_analyze_document.return_value = poller
+        c._client = inner
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
+            tf.write(b"%PDF fake")
+            path = tf.name
+
+        # fitz should not even be consulted when batching is disabled.
+        with patch("fitz.open", side_effect=AssertionError("should not open")):
+            blocks = c.extract_blocks(path, ".pdf")
+
+        assert len(blocks) == 1
+        _, kwargs = inner.begin_analyze_document.call_args
+        assert "pages" not in kwargs

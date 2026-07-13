@@ -76,27 +76,104 @@ class DocIntelligenceClient:
         """Run Layout on a file path and convert the result into Blocks.
 
         Empty list if the extension is unsupported or the service fails.
+
+        Dense PDFs are segmented into page-range batches (see
+        ``DocIntelConfig.page_batch_size``) so a single whole-document Layout
+        call cannot exceed the function timeout. Batches are analysed
+        concurrently and their blocks concatenated in page order.
         """
         if not self.enabled:
             return []
         if ext.lower() not in LAYOUT_SUPPORTED_EXTS:
             return []
 
+        content_type = _CONTENT_TYPE_BY_EXT.get(ext.lower(), "application/octet-stream")
+
         try:
-            client = self._lazy_client()
-            content_type = _CONTENT_TYPE_BY_EXT.get(ext.lower(), "application/octet-stream")
             with open(file_path, "rb") as f:
-                poller = client.begin_analyze_document(
-                    model_id="prebuilt-layout",
-                    body=f,
-                    content_type=content_type,
-                    # Request figure cropping so the LRO returns embedded image bytes.
-                    output=["figures"],
-                )
-            result = poller.result()
+                data = f.read()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not read {file_path}: {e}")
+            return []
+
+        page_ranges = self._page_ranges(data, ext)
+
+        try:
+            if page_ranges is None:
+                blocks = self._analyze_range(data, content_type, pages=None)
+            else:
+                blocks = self._analyze_segmented(data, content_type, page_ranges)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Document Intelligence failed for {file_path}: {e}")
             return []
+
+        # Re-number blocks so ``order`` is globally sequential after merging.
+        for i, b in enumerate(blocks):
+            b.order = i
+
+        logger.info(f"DocIntel extracted {len(blocks)} blocks from {file_path} "
+                    f"({sum(1 for b in blocks if b.is_image)} images"
+                    f"{f', {len(page_ranges)} page-batches' if page_ranges else ''})")
+        return blocks
+
+    # ------------------------------------------------------------------ #
+
+    def _page_ranges(self, data: bytes, ext: str) -> list[str] | None:
+        """Return a list of ``"start-end"`` page ranges to segment a dense PDF,
+        or ``None`` to analyse the whole document in a single call.
+        """
+        batch = int(getattr(self._cfg, "page_batch_size", 0) or 0)
+        if batch <= 0 or ext.lower() != ".pdf":
+            return None
+        try:
+            import fitz  # PyMuPDF
+            with fitz.open(stream=data, filetype="pdf") as doc:
+                total = doc.page_count
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not count PDF pages, using single call: {e}")
+            return None
+        if total <= batch:
+            return None
+        return [f"{s}-{min(s + batch - 1, total)}" for s in range(1, total + 1, batch)]
+
+    def _analyze_segmented(
+        self, data: bytes, content_type: str, page_ranges: list[str]
+    ) -> list[Block]:
+        """Analyse each page range (concurrently) and concatenate in page order."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = max(1, int(getattr(self._cfg, "page_batch_concurrency", 4) or 1))
+        results: list[list[Block]] = [[] for _ in page_ranges]
+
+        def _run(i: int, pages: str) -> None:
+            results[i] = self._analyze_range(data, content_type, pages=pages)
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(page_ranges))) as pool:
+            futures = [pool.submit(_run, i, pr) for i, pr in enumerate(page_ranges)]
+            for fut in futures:
+                fut.result()  # propagate exceptions
+
+        merged: list[Block] = []
+        for seg in results:
+            merged.extend(seg)
+        return merged
+
+    def _analyze_range(
+        self, data: bytes, content_type: str, pages: str | None
+    ) -> list[Block]:
+        """Run Layout over the whole document or a single page range."""
+        client = self._lazy_client()
+        kwargs: dict = {
+            "model_id": "prebuilt-layout",
+            "body": data,
+            "content_type": content_type,
+            # Request figure cropping so the LRO returns embedded image bytes.
+            "output": ["figures"],
+        }
+        if pages is not None:
+            kwargs["pages"] = pages
+        poller = client.begin_analyze_document(**kwargs)
+        result = poller.result()
 
         blocks: list[Block] = []
         order = 0
@@ -164,8 +241,6 @@ class DocIntelligenceClient:
             ))
             order += 1
 
-        logger.info(f"DocIntel extracted {len(blocks)} blocks from {file_path} "
-                    f"({sum(1 for b in blocks if b.is_image)} images)")
         return blocks
 
     def close(self) -> None:

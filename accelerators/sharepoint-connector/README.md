@@ -2,7 +2,7 @@
 
 A production-oriented push connector that keeps an Azure AI Search index in sync with one (or a subset of) SharePoint site  so a Microsoft Copilot Studio agent can ground its answers on up-to-date enterprise content while honouring each user's access rights.
 
-This accelerator aims to overcome the [SharePoint knowledge source](https://learn.microsoft.com/en-us/microsoft-copilot-studio/knowledge-add-sharepoint) option [limitations](https://learn.microsoft.com/en-us/microsoft-copilot-studio/requirements-quotas#sharepoint-web-app-limits) on file size (over 200MB) and multi-modal indexing.
+This accelerator aims to overcome the [SharePoint knowledge source](https://learn.microsoft.com/en-us/microsoft-copilot-studio/knowledge-add-sharepoint) option [limitations](https://learn.microsoft.com/en-us/microsoft-copilot-studio/requirements-quotas#sharepoint-web-app-limits) on file size (over 200MB), multi-modal indexing, and metadata-driven content filtering.
 
 ## Table of Contents
 
@@ -23,6 +23,7 @@ This accelerator aims to overcome the [SharePoint knowledge source](https://lear
   - [Switch Between Processing Modes](#switch-between-processing-modes)
   - [Adjust Concurrency](#adjust-concurrency)
   - [Change the Search Index Schema](#change-the-search-index-schema)
+  - [Manually Re-queue Specific Files](#manually-re-queue-specific-files)
 - [Troubleshooting](#troubleshooting)
 - [Appendix](#appendix)
   - [Key Requirements](#key-requirements)
@@ -38,7 +39,7 @@ This accelerator aims to overcome the [SharePoint knowledge source](https://lear
 
 Ship a push-model SharePoint → Azure AI Search connector that a Copilot Studio agent can query over a **unified multimodal index** (text + image content in the same vector space), from a **well-defined subset** of a SharePoint site, with **deletion propagation**, **nightly backups**, and **least-privilege Graph access** — all running as a serverless Azure Function.
 
-Azure AI Search's [SharePoint connector (preview)](https://docs.azure.cn/en-us/search/search-howto-index-sharepoint-online)  has real limitations: no private endpoint support, no Conditional Access compatibility, no SLA, and limited control over the extraction pipeline. This accelerator is a worked example of how to build a custom push pipeline that gives you all of that control while still using the latest Azure services under the hood (Azure AI Vision multimodal embeddings, Document Intelligence Layout, Copilot Studio's built-in generative orchestration).
+Azure AI Search's [SharePoint connector (preview)](https://docs.azure.cn/en-us/search/search-howto-index-sharepoint-online) has real limitations: no private endpoint support, no Conditional Access compatibility, no SLA, and limited control over the extraction pipeline. This accelerator is a worked example of how to build a custom push pipeline that gives you all of that control while still using the latest Azure services under the hood (Azure OpenAI `text-embedding-3-large` embeddings + `gpt-5.1` image captioning, Document Intelligence Layout, Copilot Studio's built-in generative orchestration).
 
 ---
 
@@ -48,8 +49,13 @@ Use cases this accelerator is designed to enable:
 
 1. **Grounded Copilot Studio agents over SharePoint content.** A generative-orchestration agent answers employee questions using the most recent SharePoint documents, with citations back to the source files.
 2. **Multimodal retrieval.** Text queries find images too. A question about "our Q3 revenue chart" surfaces the slide containing the chart, not just text that mentions Q3.
-3. **Scoped monitoring.** Point the indexer at a specific site OR a specific folder within a site's library, so one connector instance watches one team's content without touching the rest of the tenant.
-4. **Near-real-time deletion propagation.** When a file is deleted in SharePoint, its chunks leave the index on the next indexer run — no manual cleanup.
+3. **Visio diagram search.** Visio files (`.vsdx`, and `.vsd` when LibreOffice is available) have their on-canvas shape and stencil labels extracted with the Python standard library (no third-party package), so flowcharts and network diagrams become searchable by their labels alongside other documents.
+4. **Scoped monitoring.** Point the indexer at a specific site OR a specific folder within a site's library, so one connector instance watches one team's content without touching the rest of the tenant.
+5. **Near-real-time deletion propagation.** When a file is deleted in SharePoint, its chunks leave the index on the next indexer run — no manual cleanup.
+
+6. **Metadata column filter.** Set `METADATA_FILTERS=DocumentStatusTX=Approved` (comma-separated `column=value` pairs; AND logic; case-insensitive) so only files whose SharePoint column values match are dispatched for indexing. Files that don't match are skipped before any download, embedding, or index write. Works in both full-listing and delta modes. Useful for libraries that use approval workflows — only publish content that has been formally approved.
+
+7. **Video transcription.** Video files (`.mp4`, `.mov`, `.avi`, `.mkv`, `.wmv`, `.m4v`, `.webm`) are transcribed via **Azure Speech Fast Transcription API** using the same Foundry AIServices account as Azure OpenAI — no separate resource needed, and available in Canada Central. [PyAV](https://pyav.org/) extracts a 16 kHz mono WAV from the video in-memory; a single synchronous POST returns timestamped phrase-level results, which are grouped into `~60 s` text blocks with `[MM:SS–MM:SS]` timestamps and embedded alongside documents.
 
 Additional feature extensions like **Per-user security trimming** are shared under [Extension Guide](#extension-guide).
 
@@ -57,13 +63,14 @@ Additional feature extensions like **Per-user security trimming** are shared und
 
 ## Architecture Diagram
 
-![SharePoint Connector Architecture](images/sharepoint-connector-architecture.png)
+![SharePoint Connector Architecture](images/solution-architecture.png)
 
-Editable source: [images/sharepoint-connector-architecture.drawio](images/sharepoint-connector-architecture.drawio) — open in [draw.io](https://app.diagrams.net) or the VS Code Draw.io extension, edit, then re-export to `sharepoint-connector-architecture.png` (same folder) to update the rendered image above.
+Editable source (open in [draw.io](https://app.diagrams.net) or the VS Code Draw.io extension):
+- [images/sharepoint-connector-architecture-updated.drawio](images/sharepoint-connector-architecture-updated.drawio) — **current** diagram reflecting Azure OpenAI embeddings, Visio support, Azure Speech Fast Transcription for video, and the Metadata Column Filter.
 
-**Flow at a glance (default deployment).** The dispatcher (timer) asks SharePoint (via Graph `/delta`) what's changed, enqueues one message per file onto Storage Queue, and advances the per-drive delta token. Queue workers scale out: each pulls a message, streams the file to tempfile, routes through Document Intelligence Layout (if enabled) or the fallback extractors, parallelises chunk vectorisation through Azure AI Vision multimodal, uploads image crops to blob for citation thumbnails, and pushes the chunks (with `permission_ids`) into the AI Search index. A Copilot Studio agent then queries that index directly via the **built-in Azure AI Search Knowledge Source** connector — vector + keyword + semantic ranker, no custom code — and grounds its responses on the retrieved chunks.
+**Flow at a glance (default deployment).** The dispatcher (timer) asks SharePoint (via Graph `/delta`) what's changed, applies the configured **metadata column filter** (`METADATA_FILTERS`), enqueues one message per matching file onto Storage Queue, and advances the per-drive delta token. Queue workers scale out: each pulls a message, streams the file to tempfile, routes by file type — Visio `.vsdx` files through a ZIP-based XML extractor (`.vsd` via LibreOffice), documents through Document Intelligence Layout (if enabled) or the fallback extractors, standalone images captioned by **`gpt-5.1`**, video files transcribed by **Azure Speech Fast Transcription** (PyAV extracts audio in-memory; a single synchronous REST call returns timestamped transcripts, grouped into `~60 s` blocks) — all text chunks are then embedded via **Azure OpenAI `text-embedding-3-large` (3072d)**, image crops uploaded to blob for citation thumbnails, and chunks (with `permission_ids`) pushed into the AI Search index. A Copilot Studio agent then queries that index directly via the **built-in Azure AI Search Knowledge Source** connector — the registered `azureOpenAI` vectorizer embeds queries server-side using `text-embedding-3-large` — vector + keyword + semantic ranker, no client-side embedding code — and grounds its responses on the retrieved chunks.
 
-> **Per-user security trimming is NOT enabled by default.** Every authenticated user of the agent sees every chunk in the index. To enforce SharePoint ACLs at query time (so users only see citations from documents they actually have access to), follow **[Extending with Per-User Security Trimming](#extending-with-per-user-security-trimming)** at the end of this document — that opt-in adds an `/api/search` Function App endpoint, an Entra app registration, and a Power Platform connection, and replaces the direct AI Search → Copilot Studio link with an HTTP action that flows the signed-in user's delegated token. The extended architecture diagram is at [images/sharepoint-connector-architecture-with-security-trimming.drawio](images/sharepoint-connector-architecture-with-security-trimming.drawio).
+> **Per-user security trimming is NOT enabled by default.** Every authenticated user of the agent sees every chunk in the index. To enforce SharePoint ACLs at query time (so users only see citations from documents they actually have access to), follow **[Extending with Per-User Security Trimming](#extending-with-per-user-security-trimming)** at the end of this document — that opt-in adds an `/api/search` Function App endpoint, an Entra app registration, and a Power Platform connection, and replaces the direct AI Search → Copilot Studio link with an HTTP action that flows the signed-in user's delegated token.
 
 ---
 
@@ -95,7 +102,7 @@ No local Python, `uv`, or `func` CLI needed — the function code is pulled from
 
 #### What the template creates
 
-Storage Account (with queue / table / blob containers), Log Analytics + Application Insights, **Azure AI Search (Basic)**, **Microsoft Foundry / Azure AI Services** multi-service (hosts Azure AI Vision multimodal embeddings), **Document Intelligence** (Layout), **Key Vault**, Flex Consumption plan, and the Function App — plus every RBAC assignment on the Function's managed identity. No "pre-existing resource" paste-in.
+Storage Account (with queue / table / blob containers), Log Analytics + Application Insights, **Azure AI Search (Basic)**, **Microsoft Foundry / Azure AI Services** multi-service (hosts **Azure OpenAI `text-embedding-3-large`** embeddings + **`gpt-5.1`** image captioning model deployments + **Azure Speech Fast Transcription** for video files — all three share the same endpoint and managed-identity RBAC role), **Document Intelligence** (Layout), **Key Vault**, Flex Consumption plan, and the Function App — plus every RBAC assignment on the Function's managed identity. No "pre-existing resource" paste-in.
 
 In addition, the template **always** creates a tiny dedicated storage account named `<baseName>ds<hash>` (suffix `ds` = "deployment scripts"), tagged `purpose=arm-deployment-scripts`, with `allowSharedKeyAccess: true`. The two ARM `deploymentScripts` (`createSearchIndex`, `publishCode`) need a key-enabled storage account to upload their script payload — without this, deployment fails with `KeyBasedAuthenticationNotPermitted` in tenants that enforce the *"Storage accounts should prevent shared key access"* Azure Policy. If your tenant has that policy in Deny mode, add a single **policy exemption** scoped to resources matching `tags['purpose'] == 'arm-deployment-scripts'` (or scope the exemption to this one resource by name). The application data path (the main storage account, BYO or template-created) does **not** rely on shared keys — only this small `*ds*` account does.
 
@@ -125,8 +132,9 @@ The template asks for **two values** — everything else is inferred, defaulted,
 |---|---|---|
 | `baseName` | ✅ | Resource-name prefix (3–16 chars). **Lowercase a–z, 0–9, hyphens only** — no spaces, underscores, dots, or uppercase. The template fails fast (synthetic resource names containing `INVALID-baseName-…`) if any disallowed character is present. A uniqueness hash is appended for globally-unique resources. |
 | `sharePointSiteUrl` | ✅ | Full URL of the SharePoint site to monitor. |
-| `location` | optional | Azure region (default `resourceGroup().location`). Pick one that supports Azure AI Vision multimodal 4.0. |
+| `location` | optional | Azure region (default `resourceGroup().location`). Azure OpenAI (`text-embedding-3-large` / `gpt-5.1`) is available in Canada Central and most Azure regions — check [Microsoft Learn](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models) for the latest availability. |
 | `enableSecurityTrimming` | optional | **Default `false`** — Copilot Studio queries AI Search directly. Flip to `true` only as part of the [Extending with Per-User Security Trimming](#extending-with-per-user-security-trimming) walkthrough. |
+| `speechLocale` | optional | BCP-47 locale for Azure Speech video transcription (default `en-US`). Adjust to the primary spoken language in your video content (e.g. `fr-FR`, `es-ES`). Video files are always included in `INDEXED_EXTENSIONS`; remove the video extensions from that app setting post-deploy to disable video indexing entirely. |
 | `apiAudience` | optional | Used **only** when `enableSecurityTrimming = true`. Supply a pre-created Entra app clientId (GUID or `api://<guid>`) when the deployer lacks `Application Administrator`; leave empty otherwise. |
 | `existingStorageAccountResourceId` | optional | **Bring-your-own (BYO) storage.** Empty (default) = template creates a new storage account. Supply the full ARM resource ID (`/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>`) to reuse an existing storage account — useful in tenants whose Azure Policy forbids creating new storage accounts. See [Bring your own storage](#bring-your-own-storage-byo) below for prerequisites. |
 
@@ -139,7 +147,7 @@ Handled by the template itself:
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FAzure%2FCopilot-Studio-and-Azure%2Fmain%2Faccelerators%2Fsharepoint-connector%2Fdeploy%2Fazuredeploy.json)
 
-Clicking the button opens the Azure portal's custom-deployment form. Fill in the two required values (`baseName`, `sharePointSiteUrl`) — leave the rest at their defaults. The template provisions **everything** — Storage Account (+ queue / table / containers), Log Analytics + App Insights, Azure AI Search (Basic), Microsoft Foundry / Azure AI Services multi-service (hosts Vision multimodal), Document Intelligence (Layout), Key Vault, Flex Consumption plan + Function App, and every RBAC assignment on the Function's managed identity. It also **pulls the latest CI-built function-app package** from GitHub Releases (`sharepoint-connector-latest`) via an ARM `deploymentScript` and writes it to the Function App's storage container — so the code is already running when the deployment finishes. No `func publish` step.
+Clicking the button opens the Azure portal's custom-deployment form. Fill in the two required values (`baseName`, `sharePointSiteUrl`) — leave the rest at their defaults. The template provisions **everything** — Storage Account (+ queue / table / containers), Log Analytics + App Insights, Azure AI Search (Basic), Microsoft Foundry / Azure AI Services multi-service (hosts Azure OpenAI `text-embedding-3-large` + `gpt-5.1` model deployments), Document Intelligence (Layout), Key Vault, Flex Consumption plan + Function App, and every RBAC assignment on the Function's managed identity. It also **pulls the latest CI-built function-app package** from GitHub Releases (`sharepoint-connector-latest`) via an ARM `deploymentScript` and writes it to the Function App's storage container — so the code is already running when the deployment finishes. No `func publish` step.
 
 After the ARM deployment succeeds, four manual steps remain — all can be completed by an admin in under 15 minutes. Steps 1, 2 and 3 are **all required** for the Function App's managed identity to actually read your SharePoint site AND download document content (skipping any one yields a `401` or `403` from Microsoft Graph at indexer-run time — see Troubleshooting **S6**).
 
@@ -200,7 +208,7 @@ After the ARM deployment succeeds, four manual steps remain — all can be compl
      - **Index name** — `sharepoint-index`.
      - **Authentication** — choose **Managed identity** if your Copilot Studio environment supports it, then grant the environment's identity the **Search Index Data Reader** role on the search service. Otherwise pick **API key** and paste a query key from **Azure Portal → Search service → Keys → Query keys**.
      - **Semantic configuration** — `sp-semantic-config`.
-     - **Vector field** — `content_embedding` (the index has a registered AI-Services-Vision vectorizer, so Copilot Studio queries are vectorised server-side; no client-side embedding code).
+     - **Vector field** — `content_embedding` (the index has a registered `azureOpenAI` vectorizer pointing at the deployed `text-embedding-3-large` model, so Copilot Studio queries are vectorised server-side — no client-side embedding code). Dimension: **3072**.
    - **Title field** — `title`. **URL field** — `source_url`. **Content field** — `content_text`. (Field names are defined in [infra/sharepoint-index.json](infra/sharepoint-index.json).)
    - Click **Add** and **Publish** the agent.
 
@@ -231,7 +239,7 @@ Use this when you've successfully run `deploy.ps1` (or the **Deploy to Azure** b
 $rg = "<your-rg>"
 $fn = "<function-app-name>"   # e.g. spindex-func-uqpqnf — the deploy.ps1 output prints it
 
-cd accelerators/sharepoint-connector
+cd sharepoint-connector
 
 func azure functionapp publish $fn --python --build local
 ```
@@ -264,7 +272,7 @@ Preferred when you need to review or customise each step.
 1. **Clone the repo** (no local Python setup needed — the function code is pulled from a GitHub Release at deploy time):
    ```bash
    git clone <repo-url>
-   cd accelerators/sharepoint-connector
+   cd sharepoint-connector
    ```
 2. **Copy the sample parameter file**, then fill in the two required values:
    ```powershell
@@ -296,11 +304,18 @@ Every operational knob lives as an **app setting** on the Function App — chang
 |---|---|---|
 | `SHAREPOINT_LIBRARIES` | *(all)* | Restrict to specific document-library display names. |
 | `SHAREPOINT_ROOT_PATHS` | *(whole library)* | Restrict to folders inside a library. |
+| `METADATA_FILTERS` | *(empty — no filter)* | Comma-separated `column=value` pairs (AND logic, case-insensitive). Only files whose SharePoint column values all match are dispatched. Example: `DocumentStatusTX=Approved`. |
 | `PROCESSING_MODE` | `since-last-run` | `full` for cleanup; `since-date` + `START_DATE` for historical backfills. |
-| `VECTORISE_CONCURRENCY` / `MULTIMODAL_MAX_IN_FLIGHT` | `8` / `8` | Raise for faster initial bulk loads (subject to Vision TPS). |
+| `DISPATCHER_SKIP_FRESH` | `true` | When `true`, the dispatcher skips enqueuing files already indexed with a matching `lastModified` — only new/changed files are queued, so a `full` pass processes just the not-yet-indexed backlog instead of re-queuing everything. Set `false` to force every enumerated file onto the queue. |
+| `VECTORISE_CONCURRENCY` / `MULTIMODAL_MAX_IN_FLIGHT` | `8` / `8` | Raise for faster initial bulk loads (subject to Azure OpenAI TPM quota). |
+| `AZURE_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-large` | Override if you deploy under a different deployment name. |
+| `AZURE_OPENAI_VISION_MODEL` | `gpt-5.1` | Override if you deploy under a different deployment name. Set empty to skip image captioning (images will be indexed only if neighbour text is available). |
+| `SPEECH_LOCALE` | `en-US` | BCP-47 locale for Azure Speech Fast Transcription. Change to match the primary spoken language of your video content. Video files are skipped if the video extensions are removed from `INDEXED_EXTENSIONS`. |
 | `BACKUP_SCHEDULE` / `BACKUP_RETENTION_DAYS` | `0 0 3 * * *` / `7` | Adjust nightly backup cadence + retention. |
 
 > **Schema-changing settings are not in this table.** The index schema (fields, vector profile, semantic config) lives in [infra/sharepoint-index.json](infra/sharepoint-index.json) and is provisioned by the Bicep deployment. Edit the JSON and re-run `deploy.ps1` — there is no longer an app-setting flag for index recreate.
+
+> **Document Intelligence concurrency (`host.json`, redeploy required).** `extensions.queues.batchSize` (default **2**) caps how many files each worker instance processes — and therefore how many concurrent Document Intelligence calls it issues — in parallel. It was lowered from 8 to 2 so that dense PDFs don't exceed the 30-minute `functionTimeout` under DI throttling during large backfills. Raise it again for throughput once a big backfill has completed.
 
 See the **[Extension Guide](#extension-guide)** for the complete list + recipes.
 
@@ -310,14 +325,14 @@ See the **[Extension Guide](#extension-guide)** for the complete list + recipes.
 
 If you don't have representative SharePoint content yet, Microsoft publishes a public corpus you can upload to your test site to exercise the pipeline end-to-end:
 
-- **[Azure-Samples / azure-search-sample-data](https://github.com/Azure-Samples/azure-search-sample-data)** — mixed PDFs, DOCX, HTML, JSON, and image files covering real retrieval scenarios (healthcare PDFs, financial reports, hotel descriptions, NASA earth-at-night imagery, etc.). Drop any of these folders into the SharePoint document library the connector is pointing at and they'll flow through the full pipeline (text extraction, image OCR / embedding via Azure AI Vision multimodal, permission-filtered retrieval).
+- **[Azure-Samples / azure-search-sample-data](https://github.com/Azure-Samples/azure-search-sample-data)** — mixed PDFs, DOCX, HTML, JSON, and image files covering real retrieval scenarios (healthcare PDFs, financial reports, hotel descriptions, NASA earth-at-night imagery, etc.). Drop any of these folders into the SharePoint document library the connector is pointing at and they'll flow through the full pipeline (text extraction, image captioning via Azure OpenAI `gpt-5.1`, embedding via `text-embedding-3-large`, permission-filtered retrieval).
 
 Recommended starter set for a quick smoke test:
 
 | Folder in the repo | Why it's useful here |
 |---|---|
 | `health-plan/` | Small set of short PDFs — fast to ingest, exercises Document Intelligence Layout. |
-| `hotel-reviews-images/` | Standalone JPGs — exercises Azure AI Vision multimodal (`vectorizeImage`) and the `content_path` / image-citation flow. |
+| `hotel-reviews-images/` | Standalone JPGs — exercises `gpt-5.1` image captioning + `text-embedding-3-large` embedding and the `content_path` / image-citation flow. |
 | `nasa-e-book/` | Large-ish PDF with embedded figures — exercises Layout's figure extraction + neighbour-text chunking. |
 | `hotels/` | JSON/HTML — exercises the plain-text path (extractors that bypass DocIntel). |
 
@@ -396,8 +411,6 @@ The default deployment lets every authenticated agent user see every chunk in th
 
 This section is an **opt-in walkthrough** for adding that feature on top of the default deployment. It's longer because it touches Entra (app registration), Microsoft Graph (admin consent on `GroupMember.Read.All`), and Power Platform (a custom connection) — three places that the default flow doesn't go near.
 
-> **Architecture changes — extended diagram:** [images/sharepoint-connector-architecture-with-security-trimming.drawio](images/sharepoint-connector-architecture-with-security-trimming.drawio)
->
 > Instead of Copilot Studio querying AI Search directly (default), it calls a `/api/search` HTTP endpoint on the Function App with the signed-in user's delegated Entra token. The Function App validates the JWT, resolves the user's transitive group memberships through Graph, builds an OData `permission_ids/any(...)` filter, and runs the hybrid query against AI Search server-side. Only chunks the caller has SharePoint access to come back.
 
 #### What this opt-in adds
@@ -525,15 +538,12 @@ Sanity tests with two users — User A who has SharePoint access to a confidenti
 
 ### Change the Embedding Model
 
-The accelerator is built around Azure AI Vision multimodal (1024d). Swap paths:
+The accelerator uses **Azure OpenAI `text-embedding-3-large` (3072d)** as the primary embedding model, with **`gpt-5.1`** for image captioning. Both are deployed as model deployments on the Foundry AIServices account. Swap paths:
 
-- **Different Vision model version** → edit the Bicep `multimodalModelVersion` var (which the deployment substitutes into [infra/sharepoint-index.json](infra/sharepoint-index.json)) and re-run `deploy.ps1`. The PUT in `createSearchIndex` updates the index in place; if the vector dimension also changes, see the destructive workflow under [Change the Search Index Schema](#change-the-search-index-schema).
-- **Different provider (e.g. Azure OpenAI text-embedding-3-large for text-only deployments)** →
-  1. Rewrite [multimodal_embeddings_client.py](multimodal_embeddings_client.py) (or add a sibling `text_embeddings_client.py`) around the target REST API. Keep the semaphore + 429 cool-off pattern.
-  2. Edit [infra/sharepoint-index.json](infra/sharepoint-index.json) — change `content_embedding.dimensions` and replace the `aiServicesVision` vectorizer block with `azureOpenAIVectorizer` parameters.
-  3. Re-deploy. If the dimension changed, follow the destructive-recreate workflow under [Change the Search Index Schema](#change-the-search-index-schema).
-  4. Image chunks will either need a separate vector field (dual-vector Pattern C) or will fall back to captions-as-text.
-- **Different dimension on the same model** → only [infra/sharepoint-index.json](infra/sharepoint-index.json) changes (`content_embedding.dimensions`); everything else is already parametrised.
+- **Different Azure OpenAI embedding model** → change the `embeddingModelName` / `embeddingDeploymentName` / `embeddingDimensions` vars in [infra/main.bicep](infra/main.bicep) and re-run `deploy.ps1`. If the dimension changes (e.g. switching from 3072d to 1536d), follow the destructive-recreate workflow under [Change the Search Index Schema](#change-the-search-index-schema) — AI Search rejects in-place dimension changes.
+- **Different vision model for image captioning** → change the `visionModelName` / `visionDeploymentName` vars in [infra/main.bicep](infra/main.bicep) and update `AZURE_OPENAI_VISION_MODEL` app setting. No index changes required.
+- **Azure AI Vision Florence 4.0 fallback** (for regions without Azure OpenAI quota) → leave `AZURE_OPENAI_ENDPOINT` empty and set `MULTIMODAL_ENDPOINT` to your Foundry / AI Services endpoint. The indexer will use `multimodal_embeddings_client.py` (1024d). **Note:** Florence 4.0 and Azure OpenAI vectors are not compatible — do not mix them in the same index. If switching from one to the other, follow the destructive-recreate workflow and set `content_embedding.dimensions` to `1024` in [infra/sharepoint-index.json](infra/sharepoint-index.json) and replace the `azureOpenAI` vectorizer block with `aiServicesVision`.
+- **Different dimension on the same model** → only [infra/sharepoint-index.json](infra/sharepoint-index.json) changes (`content_embedding.dimensions` and the Bicep `embeddingDimensions` var); re-deploy to apply.
 
 ### Switch Between Processing Modes
 
@@ -561,8 +571,8 @@ Three knobs, tuned independently:
 | Setting | Scope | Default | Raise when… | Lower when… |
 |---|---|---|---|---|
 | `MAX_CONCURRENCY` | Per-dispatcher ThreadPool (only used in `inline` mode) | 4 | Using inline mode on small files | Memory pressure on 2 GB instances |
-| `VECTORISE_CONCURRENCY` | Per-worker ThreadPool for chunk vectorisation | 8 | Initial bulk load; Vision TPS headroom available | Vision throwing 429s even after cool-off |
-| `MULTIMODAL_MAX_IN_FLIGHT` | Hard ceiling on in-flight Vision requests per Function instance (global semaphore inside the client) | 8 | Confirmed higher Vision SKU TPS | Consistent 429s |
+| `VECTORISE_CONCURRENCY` | Per-worker ThreadPool for chunk vectorisation | 8 | Initial bulk load; OpenAI TPM headroom available | OpenAI throwing 429s even after cool-off |
+| `MULTIMODAL_MAX_IN_FLIGHT` | Hard ceiling on in-flight embedding/vision requests per Function instance (global semaphore inside the client) | 8 | Confirmed higher Azure OpenAI TPM quota | Consistent 429s |
 
 Rule of thumb: keep `VECTORISE_CONCURRENCY` ≤ `MULTIMODAL_MAX_IN_FLIGHT`. The client semaphore enforces the real ceiling regardless — these are both bounded safety nets, not performance tuning of the same thing.
 
@@ -592,6 +602,43 @@ Azure AI Search rejects in-place updates of these. The nightly backup under `bac
 3. Edit [infra/sharepoint-index.json](infra/sharepoint-index.json) with the new schema.
 4. Re-run `.\infra\deploy.ps1` — the deploymentScript PUTs the new index from scratch.
 5. Run a full reindex (`PROCESSING_MODE=full` for one pass) to repopulate data under the new schema.
+
+### Manually Re-queue Specific Files
+
+Sometimes you don't want to wait for the dispatcher or run a full pass — you just want to (re)process a **known list of files** (e.g. items that timed out, files you just fixed in SharePoint, or the rows from an `unindexed-approved-files.csv` report). The [enqueue_files.py](enqueue_files.py) helper drops messages straight onto the same `sp-indexer-q` queue the dispatcher uses, so the existing `sp_worker` functions pick them up and process them normally — **no dispatcher run required**.
+
+Because it re-uses the connector's own `state_store.enqueue`, the message body and encoding are identical to a dispatcher-produced message, so there is no format-mismatch risk.
+
+**Prerequisites** — the identity running the script needs *both*:
+
+- Graph read access to the site (`Sites.Read.All` / `Files.Read.All`) — to resolve a path/URL to a Graph `item_id`, and
+- `Storage Queue Data Message Sender` on the connector's storage account — to write the queue.
+
+The Function App's managed identity already has both, so the most reliable place to run this is a context that carries that identity (Kudu/SSH console on the app), or set `CLIENT_SECRET`/`CLIENT_ID`/`TENANT_ID` for an app registration that holds the Graph app-permissions plus an `az login` that holds the queue role. Run it from the `sharepoint-connector` directory (same env/app settings the Function App uses).
+
+**Input** — each file reference can be either a drive-relative path *or* a full SharePoint URL (the `Url`/`source_url` column emitted in the report CSVs):
+
+```powershell
+# 1) Pass one or more paths / URLs directly as parameters:
+python enqueue_files.py "Reports/Q3-Summary.pdf" "Manuals/Operator Guide (NEW).pdf"
+
+# Full URLs work too (quote them):
+python enqueue_files.py "https://contoso.sharepoint.com/sites/YourSite/Shared%20Documents/Reports/Q3-Summary.pdf"
+
+# 2) Or point it at a plain text file (one path/URL per line; '#' comments allowed):
+python enqueue_files.py --paths-file ./missing.txt
+
+# 3) Or feed it a CSV and name the column that holds the path/URL —
+#    e.g. the Url column of the unindexed-approved-files.csv report:
+python enqueue_files.py --paths-file ./unindexed-approved-files.csv --csv-column Url
+
+# Preview what would be enqueued without writing to the queue:
+python enqueue_files.py --paths-file ./missing.txt --dry-run
+```
+
+All files in one invocation share a single `run_id` (visible in the `runState` table), unresolved references are reported and skipped, and the rest are still enqueued. Watch them drain with the queue-depth and run-history probes in [Troubleshooting](#troubleshooting).
+
+> **Note:** the worker still honours the same guardrails as a normal run — it skips files already indexed and unchanged (`lastModified` match), and skips anything over `MAX_FILE_SIZE_MB`. To force reprocessing of an *unchanged* file, touch it in SharePoint first (so its `lastModifiedDateTime` advances) or temporarily raise the size limit for oversized items.
 
 ---
 
@@ -656,6 +703,52 @@ Invoke-RestMethod -Method Get `
     -Uri "https://$searchSvc.search.windows.net/indexes/sharepoint-index/docs/`$count?api-version=2024-07-01" `
     -Headers @{ "api-key" = $searchKey }
 ```
+
+#### Which files have been processed / indexed?
+
+The index stores one *chunk* per row; each source file is split into many chunks that share a `parent_id`. The `$count` above returns the **chunk** total, not the file total. To see the **distinct files** that made it into the index, group by `parent_id` and read back `title` (the file name) and `source_url` (the SharePoint URL):
+
+```powershell
+# A query key is enough for reads (admin key also works):
+$searchKey = az search query-key list --service-name $searchSvc --resource-group $rg --query "[0].key" -o tsv
+$resp = Invoke-RestMethod -Method Post `
+    -Uri "https://$searchSvc.search.windows.net/indexes/sharepoint-index/docs/search?api-version=2024-07-01" `
+    -Headers @{ "api-key" = $searchKey; "Content-Type" = "application/json" } `
+    -Body '{"search":"*","count":true,"top":1000,"select":"title,parent_id,source_url"}'
+
+Write-Host ("Chunks: {0}   Files: {1}" -f $resp.'@odata.count', ($resp.value.parent_id | Sort-Object -Unique).Count)
+$resp.value | Group-Object parent_id | ForEach-Object {
+    [pscustomobject]@{ Title = $_.Group[0].title; Chunks = $_.Count; Url = $_.Group[0].source_url }
+} | Sort-Object Title | Format-Table -AutoSize
+```
+
+> **Duplicate file names are normal.** Two rows titled `Main Document.pdf` are *different* source items (different `parent_id` / SharePoint folder), not duplicates of one file — disambiguate with the `Url` column. The index holds > 1000 chunks? Paginate with `"skip"` or facet instead; `top` caps at 1000 per request.
+
+Check a **single file**'s chunks (e.g. to confirm it was captioned/embedded):
+
+```powershell
+Invoke-RestMethod -Method Post `
+    -Uri "https://$searchSvc.search.windows.net/indexes/sharepoint-index/docs/search?api-version=2024-07-01" `
+    -Headers @{ "api-key" = $searchKey; "Content-Type" = "application/json" } `
+    -Body '{"search":"*","filter":"title eq ''Chylothorax algorithm.pdf''","select":"chunk_id,title,content_type,source_url"}'
+```
+
+To reconcile *expected vs. processed vs. failed* for a run, read the three state tables together — **`runState`** (per-run `expected/completed/failed` counters), **`failedFiles`** (files the worker gave up on after 5 dequeue retries), and **`watermark`** (the per-drive delta token, proves the dispatcher advanced):
+
+```powershell
+az storage entity query --account-name $storage --table-name runState    --auth-mode login --query "items | sort_by(@, &Timestamp) | reverse(@) | [:5].{run:RowKey, expected:expected, completed:completed, failed:failed}" -o table
+az storage entity query --account-name $storage --table-name failedFiles  --auth-mode login --query "items[].{file:RowKey, attempts:failure_count, error:last_error}" -o table
+```
+
+**A file is in SharePoint but missing from the index?** Walk it down the pipeline:
+
+| Stage | Where to look | What it means |
+|-------|---------------|---------------|
+| Was it picked up? | `traces` KQL: `message has "Dispatched run"` and the per-run count | Dispatcher saw it (passed the `METADATA_FILTERS` column filter and delta scan) |
+| Is it still queued? | `az storage message peek --queue-name sp-indexer-q` | Waiting for / mid-processing by a worker |
+| Did it fail terminally? | `failedFiles` table + `sp-indexer-q-poison` queue | Worker exhausted 5 retries — read `last_error` |
+| Did the worker error? | `exceptions` KQL (see below) filtered by file name | Extraction / captioning / upload exception |
+| Filtered out by design? | `METADATA_FILTERS` app setting | Column-value filter excluded it before enqueue |
 
 #### Application Insights queries (KQL)
 
@@ -723,7 +816,7 @@ Live log stream (no ingestion lag) — open in the portal: **Function App → Lo
 **Fix.** Re-publish via Azure Functions Core Tools, which uses the right endpoint:
 
 ```powershell
-cd accelerators/sharepoint-connector
+cd sharepoint-connector
 func azure functionapp publish $fn --python --build remote
 ```
 
@@ -808,7 +901,7 @@ Remove-Item search-auth.json
 
 #### S5. Search Explorer or Copilot Studio query returns **`Could not complete vectorization action. The service failed to authenticate to the vectorization endpoint.`**
 
-**Root cause.** The index has the registered `aiServicesVision` vectorizer (so AI Search can vectorize text queries server-side), but the search service has no managed identity with which to call the Foundry endpoint.
+**Root cause.** The index has the registered `azureOpenAI` vectorizer (so AI Search can vectorize text queries server-side using `text-embedding-3-large`), but the search service has no managed identity with which to call the Foundry endpoint.
 
 **Fix already in Bicep.** [main.bicep](infra/main.bicep) enables `searchService.identity = SystemAssigned` and grants `Cognitive Services User` on Foundry to that MI (`searchToFoundryAssignment`).
 
@@ -909,7 +1002,7 @@ az deployment-scripts delete  --resource-group $rg --name "<baseName>-create-ind
 **Manual remediation** — re-publish with `--build remote` so Oryx installs from the latest `requirements.txt`:
 
 ```powershell
-cd accelerators/sharepoint-connector
+cd sharepoint-connector
 func azure functionapp publish $fn --python --build remote
 ```
 
@@ -939,7 +1032,7 @@ The concrete requirements this accelerator was designed to meet, and how each is
 |---|---|---|
 | 1 | Process all files OR since a configured date OR since last successful run | `PROCESSING_MODE` env var: `full` / `since-date` / `since-last-run` (default) with persistent watermark + delta tokens. |
 | 2 | Scale past 50 files per run | Queue-fed fan-out: timer dispatcher enqueues one message per file; queue-triggered workers scale to 40 instances. |
-| 3 | Multimodal RAG for text- and image-heavy documents | Azure AI Vision multimodal embeddings (1024d, same space for text + images); optional Document Intelligence Layout for structural extraction. |
+| 3 | Multimodal RAG for text- and image-heavy documents | Azure OpenAI `text-embedding-3-large` (3072d) for all text and image chunks; `gpt-5.1` generates image captions before embedding; optional Document Intelligence Layout for structural extraction. |
 | 4 | Semantic indexing | Azure AI Search `semanticConfiguration` with HNSW vector + hybrid query. |
 | 5 | Large files >200 MB | Streaming download to tempfile; path-based extractors (PyMuPDF, python-docx/pptx, openpyxl read-only); default cap 500 MB. |
 | 6 | Scope to one site / folder / library | `SHAREPOINT_SITE_URL` + `SHAREPOINT_LIBRARIES` + `SHAREPOINT_ROOT_PATHS`. |
@@ -989,6 +1082,9 @@ sharepoint-connector/
 │── multimodal_embeddings_client.py   # Azure AI Vision vectorize{Text,Image}
 │                                     # + bounded-concurrency semaphore + 429
 │                                     #   cool-off
+│── speech_transcription_client.py    # Azure Speech Fast Transcription wrapper
+│                                     # PyAV audio extract → 16kHz WAV → REST
+│                                     # POST → ~60s timestamped TEXT blocks
 │── chunker.py                        # chunk_text / chunk_blocks
 │── blocks.py                         # Block + LocationMetadata dataclasses
 │── search_client.py                  # AI Search data plane: upload_documents,
@@ -1042,6 +1138,7 @@ sharepoint-connector/
     ├── test_config.py                #   env-var resolution
     ├── test_doc_intelligence.py      #   Layout-result → Block mapping
     ├── test_document_processor.py    #   all extractors
+    ├── test_content_understanding.py #   Azure Speech transcription helpers
     ├── test_multimodal_client.py     #   vectorize + 429 + semaphore bound
     ├── test_processing_modes.py      #   full / since-date / since-last-run
     └── test_search_security.py       #   JWT + filter + identity cache
@@ -1070,14 +1167,15 @@ Each scheduled run follows these steps.
 2. **Poison protection.** `state_store.get_failure_count(item_id)` skips items that have already failed ≥5 times (message flows on to `sp-indexer-q-poison`).
 3. **Stream download.** `SharePointClient.download_file_to_path(...)` streams bytes from Graph to a tempfile — memory stays bounded no matter the file size.
 4. **Fetch permissions.** `get_item_permissions` returns the Entra object IDs that have access (from `grantedToV2` + `grantedToIdentitiesV2`). These become the chunk's `permission_ids`.
-5. **Extract blocks.** `extract_blocks(path, name, doc_intel=...)` routes:
+5. **Extract blocks.** `extract_blocks(path, name, doc_intel=..., video_transcriber=...)` routes:
    - Standalone image files → one `IMAGE` block with raw bytes.
    - PDF / DOCX / PPTX / XLSX with DocIntel enabled → `prebuilt-layout` → paragraph + table + figure blocks with bounding polygons.
+   - Video files (`.mp4`, `.mov`, `.avi`, `.mkv`, `.wmv`, `.m4v`, `.webm`) with `video_transcriber` supplied → PyAV extracts 16 kHz mono WAV in-memory → single synchronous POST to the **Azure Speech Fast Transcription API** (reuses `AZURE_OPENAI_ENDPOINT`) → phrase-level results grouped into `~60 s` `TEXT` blocks with `[MM:SS–MM:SS]` timestamps.
    - Everything else → hand-written extractor → one `TEXT` block per file.
 6. **Chunk.** `chunk_blocks(blocks, doc_id, chunk_size, chunk_overlap)`:
    - Text blocks are concatenated and split with overlap at paragraph / sentence boundaries.
    - Image blocks become their own chunk with the immediately preceding + following paragraphs attached as `neighbour_text`.
-7. **Vectorise in parallel.** Every chunk goes through the same multimodal endpoint, up to `VECTORISE_CONCURRENCY` at once per worker. The `MultimodalEmbeddingsClient` enforces the global ceiling (`MULTIMODAL_MAX_IN_FLIGHT`) and a shared 429 cool-off so concurrent workers back off together.
+7. **Vectorise in parallel.** Every chunk (text or image caption) goes through Azure OpenAI `text-embedding-3-large`, up to `VECTORISE_CONCURRENCY` at once per worker. The `OpenAIEmbeddingsClient` enforces the global ceiling (`MULTIMODAL_MAX_IN_FLIGHT`) and a shared 429 cool-off so concurrent workers back off together.
 8. **Store image crops.** For each image chunk, `ImageStore.upload_image(...)` pushes the cropped bytes into the `images` blob container and stamps `content_path` on the chunk.
 9. **Delete old chunks for this parent.** `search.delete_documents_by_parent(parent_id)` clears any prior version.
 10. **Push.** A single `search.upload_documents(docs)` writes every chunk (text + image) of the file to the index in one batch.
@@ -1088,7 +1186,7 @@ Each scheduled run follows these steps.
 1. **Request arrives.** Copilot Studio's `OnKnowledgeRequested` topic posts `{ query, top }` with the signed-in user's delegated Entra token in `Authorization`.
 2. **JWT validation.** `validate_user_token(bearer, audience, tenant)` verifies signature (via Entra JWKS), audience, issuer, expiry. Extracts `oid` + `tid`.
 3. **Identity resolution.** `GraphIdentityResolver.get_identity_ids(user_oid)` calls `/users/{oid}/transitiveMemberOf` using the Function's managed identity (`GroupMember.Read.All`) and returns `[user_oid, group_oid_1, group_oid_2, …]`. Cached in-process for `IDENTITY_CACHE_TTL_SECONDS` (default 5 min).
-4. **Filter + hybrid query.** `SearchPushClient.search_with_trimming(...)` builds `permission_ids/any(p: p eq 'id1') or … or p eq 'idN'` and runs a semantic + vector query against `content_embedding`. The registered `aiServicesVision` vectorizer converts the query text into a 1024d vector server-side.
+4. **Filter + hybrid query.** `SearchPushClient.search_with_trimming(...)` builds `permission_ids/any(p: p eq 'id1') or … or p eq 'idN'` and runs a semantic + vector query against `content_embedding`. The registered `azureOpenAI` vectorizer converts the query text into a 3072d vector server-side using `text-embedding-3-large`.
 5. **Return citations.** Ranked list with `{ title, url, chunk, has_image, content_path, location_metadata, score, reranker_score }`. Copilot Studio uses these as grounded evidence.
 
 ### Addressing Well-Architected H/M Risks
@@ -1103,7 +1201,7 @@ Concrete playbooks for the high / medium severity items still open in the Well-A
 | R1 | Single region | Reliability | M | Stand up the same Bicep in a paired region; add a Traffic-Manager / Front Door profile for `/api/search` if you need active/passive. The index itself isn't replicated — use the nightly backup to rehydrate. |
 | R5 | No health / liveness probe | Reliability | M | Add an HTTP-triggered `sp_health` function that HEAD-pings Search + Foundry + Graph (with MI) and returns 200 / 503. Hook it to an App Insights availability test. |
 | R6 | No retry budget across downstream calls | Reliability | M | Track total backoff time in a `threading.local` timer inside each worker; abort with "retry budget exhausted" after e.g. 60 s cumulative sleep. |
-| R9 | Multimodal endpoint is a single hard dependency | Reliability | M | Add a secondary Foundry endpoint in a different region; `MultimodalEmbeddingsClient` falls over to it when primary returns 5xx for N consecutive calls. |
+| R9 | Azure OpenAI endpoint is a single hard dependency | Reliability | M | Add a secondary Foundry endpoint in a different region; `OpenAIEmbeddingsClient` falls over to it when primary returns 5xx for N consecutive calls. |
 | S3 | Function master key still emitted | Security | M | After the queue-mode migration settles, disable the master key and switch the `/api/backup` endpoint to Entra auth to match `/api/search`. |
 | S5 | No Microsoft Defender | Security | M | Enable Defender for Storage + Defender for App Service at the subscription level. No Bicep work — subscription policy. |
 | S6 | Data-retention / purge policy | Security | M | Add `MAX_STALE_DAYS` env var; the periodic reconciliation pass (already in place) deletes orphans older than that. |
@@ -1135,8 +1233,7 @@ Concrete playbooks for the high / medium severity items still open in the Well-A
 
 ### In this repository
 
-- **Architecture diagram**: [PNG](images/sharepoint-connector-architecture.png) · [draw.io source](images/sharepoint-connector-architecture.drawio)
-- **Video talk script**: [video-talk-script.md](video-talk-script.md)
+- **Architecture diagram**: [draw.io source](images/sharepoint-connector-architecture-updated.drawio)
 - **Copilot Studio topic YAML**: [copilot-studio-topics/OnKnowledgeRequested.yaml](copilot-studio-topics/OnKnowledgeRequested.yaml)
 - **Sites.Selected helper**: [infra/grant-site-permission.ps1](infra/grant-site-permission.ps1)
 - **Bicep template**: [infra/main.bicep](infra/main.bicep)
